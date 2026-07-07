@@ -143,16 +143,26 @@ async function loadProfiles() {
   if (!proxyBase()) { setStatus('Enter your Railway proxy URL first', 'err'); return; }
   setStatus('Loading profiles...', 'loading');
   try {
-    const data = await apiFetch('/v1/profiles');
-    const profiles = data.profiles || data;
-    if (!profiles || !profiles.length) throw new Error('No profiles returned');
+    const accData = await apiFetch('/v1/accounts');
+    const accounts = accData.accounts || accData;
+    if (!accounts || !accounts.length) throw new Error('No accounts returned');
+
+    const profiles = [];
+    for (const acc of accounts) {
+      const accId = acc.account_id || acc.id;
+      const data = await apiFetch(`/v1/accounts/${accId}/profiles`);
+      const accProfiles = data.profiles || data;
+      (accProfiles || []).forEach(p => profiles.push({ ...p, account_name: acc.account_name || acc.name }));
+    }
+    if (!profiles.length) throw new Error('No profiles returned');
     const sel = document.getElementById('profileSel');
     sel.innerHTML = '';
     sel.disabled = false;
     profiles.forEach(p => {
       const o = document.createElement('option');
       o.value = p.profile_id || p.id;
-      o.textContent = (p.profile_name || p.name || 'Profile') + ' (' + (p.profile_id || p.id) + ')';
+      const label = (p.profile_name || p.name || 'Profile') + ' (' + (p.profile_id || p.id) + ')';
+      o.textContent = accounts.length > 1 ? `${label} — ${p.account_name}` : label;
       sel.appendChild(o);
     });
     document.getElementById('btnRun').disabled = false;
