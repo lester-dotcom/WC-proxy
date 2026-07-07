@@ -42,12 +42,14 @@
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #f8fafc; color: #718096; font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 2px solid #e2e8f0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
-  td { padding: 7px 10px; border-bottom: 1px solid #f0f4f8; vertical-align: middle; }
+  th { background: #f8fafc; color: #718096; font-weight: 600; text-align: left; padding: 8px 10px; border-bottom: 2px solid #e2e8f0; border-right: 1px solid #e9edf1; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+  td { padding: 7px 10px; border-bottom: 1px solid #f0f4f8; border-right: 1px solid #f0f4f8; vertical-align: middle; }
+  th:last-child, td:last-child { border-right: none; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: #fafbfc; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
-  td.ctr { text-align: center; }
+  td.num, th.num { text-align: right; }
+  td.num { font-variant-numeric: tabular-nums; font-weight: 600; }
+  td.ctr, th.ctr { text-align: center; }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; }
   .pill.g { background: #e6f4d7; color: #276749; }
   .pill.b { background: #d6e4f4; color: #1a4c7b; }
@@ -347,7 +349,8 @@ function changePill(d, currency) {
 
 function tbl(rows, cols, opts) {
   opts = opts || {};
-  const ths = cols.map(c=>`<th>${c.label}</th>`).join('');
+  const clsFor = c => (c.pct||c.change) ? 'ctr' : c.num ? 'num' : '';
+  const ths = cols.map(c=>`<th class="${clsFor(c)}">${c.label}</th>`).join('');
   const trs = rows.map((r,idx) => {
     const tds = cols.map((c,ci) => {
       const v = r[c.key];
@@ -359,8 +362,7 @@ function tbl(rows, cols, opts) {
       if (ci===0 && opts.rowClick) {
         content = `<a href="javascript:void(0)" onclick="${opts.rowClick}(${idx})" style="color:#1a4c7b;text-decoration:underline;cursor:pointer">${content}</a>`;
       }
-      const cls = (c.pct||c.change) ? 'ctr' : c.num ? 'num' : '';
-      return `<td class="${cls}">${content}</td>`;
+      return `<td class="${clsFor(c)}">${content}</td>`;
     }).join('');
     return `<tr>${tds}</tr>`;
   }).join('');
@@ -579,14 +581,14 @@ function renderAnalysis() {
       </div></div>
     </div>
     <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric)}</div></div>
-    <div class="section"><div class="section-hd">Traffic Source / Medium</div><div class="section-bd">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
+    <div class="section"><div class="section-hd">Traffic Source / Medium</div><div class="section-bd">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
     <div class="two-col">
-      <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
-      <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
+      <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
+      <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showThemeLeads'})}</div></div>
-    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30)</span><span class="note">Click a keyword to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showKeywordLeads'})}</div></div>
-    <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
+    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showThemeLeads'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30)</span><span class="note">Click a keyword to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showKeywordLeads'})}</div></div>
+    <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
     <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}])}</div></div>
   `;
 }
