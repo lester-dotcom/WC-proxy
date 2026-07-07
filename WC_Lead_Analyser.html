@@ -83,7 +83,7 @@
   <div class="config">
     <div class="field" style="min-width:280px">
       <label>Proxy URL (your Railway deployment)</label>
-      <input type="text" id="proxyBase" placeholder="https://your-wc-proxy.up.railway.app" style="width:320px">
+      <input type="text" id="proxyBase" value="https://wc-proxy-production.up.railway.app" placeholder="https://your-wc-proxy.up.railway.app" style="width:320px">
     </div>
     <div class="field" style="min-width:200px">
       <label>Profile</label>
@@ -198,13 +198,34 @@ async function fetchAllLeads(profileId, dateFrom, dateTo) {
   return all;
 }
 
+// Groups values that only differ by case/whitespace, picking the most
+// common casing as the display label (WhatConverts source/medium values
+// are free text and get entered inconsistently, e.g. "CPC" vs "cpc").
+function buildCanonicalMap(values) {
+  const counts = {};
+  values.forEach(v => {
+    const val = (v || '(not set)').trim();
+    const lower = val.toLowerCase();
+    if (!counts[lower]) counts[lower] = {};
+    counts[lower][val] = (counts[lower][val]||0) + 1;
+  });
+  const map = {};
+  Object.keys(counts).forEach(lower => {
+    const variants = counts[lower];
+    map[lower] = Object.keys(variants).sort((a,b) => variants[b]-variants[a])[0];
+  });
+  return map;
+}
+
 function populateFilterOptions(leads) {
-  const sources = [...new Set(leads.map(l => l.lead_source).filter(Boolean))].sort();
-  const mediums  = [...new Set(leads.map(l => l.lead_medium).filter(Boolean))].sort();
+  const srcMap = buildCanonicalMap(leads.map(l => l.lead_source));
+  const medMap = buildCanonicalMap(leads.map(l => l.lead_medium));
+  const srcKeys = Object.keys(srcMap).sort((a,b) => srcMap[a].localeCompare(srcMap[b]));
+  const medKeys = Object.keys(medMap).sort((a,b) => medMap[a].localeCompare(medMap[b]));
   const srcSel = document.getElementById('sourceSel');
   const medSel = document.getElementById('mediumSel');
-  srcSel.innerHTML = '<option value="">All Sources</option>' + sources.map(s => `<option value="${s}">${s}</option>`).join('');
-  medSel.innerHTML = '<option value="">All Mediums</option>' + mediums.map(m => `<option value="${m}">${m}</option>`).join('');
+  srcSel.innerHTML = '<option value="">All Sources</option>' + srcKeys.map(k => `<option value="${k}">${srcMap[k]}</option>`).join('');
+  medSel.innerHTML = '<option value="">All Mediums</option>' + medKeys.map(k => `<option value="${k}">${medMap[k]}</option>`).join('');
   srcSel.disabled = false;
   medSel.disabled = false;
 }
@@ -305,7 +326,10 @@ function renderChart(leads) {
 function getFilteredLeads() {
   const src = document.getElementById('sourceSel').value;
   const med = document.getElementById('mediumSel').value;
-  return currentLeads.filter(l => (!src || l.lead_source === src) && (!med || l.lead_medium === med));
+  return currentLeads.filter(l =>
+    (!src || (l.lead_source||'(not set)').toLowerCase().trim() === src) &&
+    (!med || (l.lead_medium||'(not set)').toLowerCase().trim() === med)
+  );
 }
 
 async function runAnalysis() {
@@ -357,12 +381,18 @@ function renderAnalysis() {
     pct:tc?Math.round((ltC[t]||0)/tc*100):0
   })).sort((a,b)=>b.curr-a.curr);
 
-  const smKey = l => `${l.lead_source||'(not set)'} / ${l.lead_medium||'(not set)'}`;
+  const srcMap = buildCanonicalMap(leads.map(l => l.lead_source));
+  const medMap = buildCanonicalMap(leads.map(l => l.lead_medium));
+  const smKey = l => `${(l.lead_source||'(not set)').toLowerCase().trim()}|${(l.lead_medium||'(not set)').toLowerCase().trim()}`;
   const smC=countBy(curr,smKey), smP=countBy(prev,smKey);
-  const sourceRows=Object.keys({...smC,...smP}).map(k=>({
-    source:k,curr:smC[k]||0,prev:smP[k]||0,change:(smC[k]||0)-(smP[k]||0),
-    pct:tc?Math.round((smC[k]||0)/tc*100):0
-  })).sort((a,b)=>b.curr-a.curr);
+  const sourceRows=Object.keys({...smC,...smP}).map(k=>{
+    const [sLower,mLower] = k.split('|');
+    return {
+      source: `${srcMap[sLower]} / ${medMap[mLower]}`,
+      curr:smC[k]||0, prev:smP[k]||0, change:(smC[k]||0)-(smP[k]||0),
+      pct:tc?Math.round((smC[k]||0)/tc*100):0
+    };
+  }).sort((a,b)=>b.curr-a.curr);
 
   const kwTC=countBy(curr,l=>groupKeyword(l.lead_keyword)), kwTP=countBy(prev,l=>groupKeyword(l.lead_keyword));
   const kwThemeRows=Object.keys({...kwTC,...kwTP}).filter(k=>k).map(k=>({
