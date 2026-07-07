@@ -10,7 +10,6 @@
   .app { display: flex; flex-direction: column; min-height: 100vh; }
   .header { background: #4c565c; color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
   .header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.02em; }
-  .tag { background: #aec90b; color: #2d3748; font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 3px; letter-spacing: 0.05em; }
   .config { background: #fff; border-bottom: 1px solid #e2e8f0; padding: 14px 24px; display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
   .field label { font-size: 10px; font-weight: 700; color: #718096; text-transform: uppercase; letter-spacing: 0.05em; display: block; margin-bottom: 5px; }
   .field input, .field select { border: 1px solid #e2e8f0; border-radius: 5px; padding: 8px 10px; font-size: 12px; color: #2d3748; background: #fff; outline: none; }
@@ -77,7 +76,6 @@
 
   <div class="header">
     <h1>WhatConverts Lead Analyser</h1>
-    <span class="tag">PRATT DIGITAL</span>
   </div>
 
   <div class="config">
@@ -135,6 +133,52 @@ let currentLeads = [];
 let currentDateFrom = '';
 let currentDateTo = '';
 let chartMetric = 'total';
+
+// Populated on each render so the Keyword Themes / Raw Keywords drill-down
+// links can look up which leads belong to the clicked row.
+let lastRenderedLeads = [];
+let lastKwThemeRows = [];
+let lastRawKwRows = [];
+
+function openLeadsWindow(matchingLeads, title) {
+  const rows = matchingLeads
+    .slice()
+    .sort((a,b) => new Date(b.date_created||b.lead_date||0) - new Date(a.date_created||a.lead_date||0))
+    .map(l => `<tr>
+      <td>${(l.date_created||l.lead_date||'').slice(0,10)}</td>
+      <td>${l.contact_name||''}</td>
+      <td>${l.contact_email_address||l.email_address||''}</td>
+      <td>${l.contact_phone_number||l.phone_number||''}</td>
+      <td>${l.lead_type||''}</td>
+      <td>${l.quotable||''}</td>
+      <td>${hasSalesValue(l)?fmtCurrency(l.sales_value):''}</td>
+      <td>${l.lead_source||''} / ${l.lead_medium||''}</td>
+    </tr>`).join('');
+  const html = `<!DOCTYPE html><html><head><title>${title} — Leads</title><meta charset="UTF-8"><style>
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:24px;color:#2d3748;background:#f4f5f7}
+    h1{font-size:16px;margin-bottom:14px}
+    table{border-collapse:collapse;width:100%;background:#fff;border-radius:8px;overflow:hidden;border:1px solid #e2e8f0}
+    th{background:#f8fafc;color:#718096;text-align:left;padding:8px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:2px solid #e2e8f0}
+    td{padding:7px 10px;border-bottom:1px solid #f0f4f8}
+    tr:last-child td{border-bottom:none}
+  </style></head><body>
+    <h1>${title} — ${matchingLeads.length} lead${matchingLeads.length===1?'':'s'}</h1>
+    <table><thead><tr><th>Date</th><th>Name</th><th>Email</th><th>Phone</th><th>Type</th><th>Quotable</th><th>Sale</th><th>Source / Medium</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </body></html>`;
+  const blob = new Blob([html], {type: 'text/html'});
+  window.open(URL.createObjectURL(blob), '_blank');
+}
+
+function showThemeLeads(idx) {
+  const theme = lastKwThemeRows[idx].theme;
+  openLeadsWindow(lastRenderedLeads.filter(l => groupKeyword(l.lead_keyword) === theme), theme);
+}
+
+function showKeywordLeads(idx) {
+  const keyword = lastRawKwRows[idx].keyword;
+  openLeadsWindow(lastRenderedLeads.filter(l => (l.lead_keyword||'').toLowerCase().trim() === keyword), keyword);
+}
 
 const CURRENCY_SYMBOL = '£';
 function fmtCurrency(v) {
@@ -301,15 +345,22 @@ function changePill(d, currency) {
   return pill(currency?fmtCurrency(0):'0','s');
 }
 
-function tbl(rows, cols) {
+function tbl(rows, cols, opts) {
+  opts = opts || {};
   const ths = cols.map(c=>`<th>${c.label}</th>`).join('');
-  const trs = rows.map(r => {
-    const tds = cols.map(c => {
+  const trs = rows.map((r,idx) => {
+    const tds = cols.map((c,ci) => {
       const v = r[c.key];
-      if (c.pct)    return `<td class="ctr">${pctPill(Number(v))}</td>`;
-      if (c.change) return `<td class="ctr">${changePill(Number(v), c.currency)}</td>`;
-      if (c.num)    return `<td class="num">${c.currency ? fmtCurrency(v) : v}</td>`;
-      return `<td>${v??''}</td>`;
+      let content;
+      if (c.pct)    content = pctPill(Number(v));
+      else if (c.change) content = changePill(Number(v), c.currency);
+      else if (c.num)    content = c.currency ? fmtCurrency(v) : v;
+      else content = v??'';
+      if (ci===0 && opts.rowClick) {
+        content = `<a href="javascript:void(0)" onclick="${opts.rowClick}(${idx})" style="color:#1a4c7b;text-decoration:underline;cursor:pointer">${content}</a>`;
+      }
+      const cls = (c.pct||c.change) ? 'ctr' : c.num ? 'num' : '';
+      return `<td class="${cls}">${content}</td>`;
     }).join('');
     return `<tr>${tds}</tr>`;
   }).join('');
@@ -386,13 +437,12 @@ function renderChart(leads, metric) {
     const b = bd[d];
     const v = valueFor(d);
     const kwP = b.total ? Math.round(b.kw/b.total*100) : 0;
-    const op  = kwP>=80?1:kwP>=50?0.75:kwP>=20?0.5:0.3;
     const secondBar = metric==='total'
       ? `<div class="bar q" style="height:${Math.round((maxV?b.quot/maxV:0)*90)}px"></div>`
       : '';
     return `<div class="bar-grp" title="${d}: ${fmtVal(v)} ${label}, ${b.total} total leads, ${kwP}% keyword">
       <div class="bars">
-        <div class="bar t" style="height:${Math.round(v/maxV*90)}px;opacity:${op}"></div>
+        <div class="bar t" style="height:${Math.round(v/maxV*90)}px"></div>
         ${secondBar}
       </div>
       <div class="bar-lbl">${d.slice(5)}</div>
@@ -401,7 +451,6 @@ function renderChart(leads, metric) {
   return `<div class="legend">
     <div class="leg-item"><div class="leg-dot" style="background:#4c565c"></div>${label}</div>
     ${metric==='total' ? '<div class="leg-item"><div class="leg-dot" style="background:#aec90b"></div>Quotable Yes</div>' : ''}
-    <div class="leg-item" style="font-size:10px;color:#a0aec0">Bar opacity reflects keyword coverage</div>
   </div>
   <div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`;
 }
@@ -492,6 +541,10 @@ function renderAnalysis() {
     .map(k => statsToRow('keyword', k, rawKwStats[k]))
     .sort((a,b)=>b.curr-a.curr).slice(0,30);
 
+  lastRenderedLeads = leads;
+  lastKwThemeRows = kwThemeRows;
+  lastRawKwRows = rawKwRows;
+
   const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
   const formRows=Object.keys({...fC,...fP}).filter(k=>k&&k!=='undefined').map(k=>{
     const c=fC[k]||0,p=fP[k]||0,diff=c-p;
@@ -531,8 +584,8 @@ function renderAnalysis() {
       <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
       <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
     </div>
-    <div class="section"><div class="section-hd">Keyword Themes</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}])}</div></div>
-    <div class="section"><div class="section-hd">Raw Keywords (top 30)</div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}])}</div></div>
+    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showThemeLeads'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30)</span><span class="note">Click a keyword to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showKeywordLeads'})}</div></div>
     <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
     <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}])}</div></div>
   `;
