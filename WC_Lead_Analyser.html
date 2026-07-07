@@ -134,6 +134,50 @@ document.getElementById('dateFrom').value = d42.toISOString().slice(0,10);
 let currentLeads = [];
 let currentDateFrom = '';
 let currentDateTo = '';
+let chartMetric = 'total';
+
+const CURRENCY_SYMBOL = '£';
+function fmtCurrency(v) {
+  return CURRENCY_SYMBOL + (Number(v)||0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function hasSalesValue(l) {
+  return l.sales_value != null && l.sales_value !== '' && Number(l.sales_value) !== 0;
+}
+
+// Groups leads by keyFn and tallies lead count, quotable-yes count, and
+// sales count/revenue for both the current and prior period in one pass,
+// so every breakdown table can show Recent/Prior/Change for each metric.
+function groupStats(curr, prev, keyFn) {
+  const stats = {};
+  const ensure = k => stats[k] || (stats[k] = {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0});
+  curr.forEach(l => {
+    const k = keyFn(l); if (k==null) return;
+    const s = ensure(k);
+    s.curr++;
+    if (l.quotable==='Yes') s.qCurr++;
+    if (hasSalesValue(l)) { s.sCurr++; s.rCurr += Number(l.sales_value); }
+  });
+  prev.forEach(l => {
+    const k = keyFn(l); if (k==null) return;
+    const s = ensure(k);
+    s.prev++;
+    if (l.quotable==='Yes') s.qPrev++;
+    if (hasSalesValue(l)) { s.sPrev++; s.rPrev += Number(l.sales_value); }
+  });
+  return stats;
+}
+
+function statsToRow(labelKey, label, s) {
+  const bookC = s.curr ? Math.round(s.qCurr/s.curr*100) : 0;
+  const bookP = s.prev ? Math.round(s.qPrev/s.prev*100) : 0;
+  return {
+    [labelKey]: label,
+    curr: s.curr, prev: s.prev, change: s.curr-s.prev,
+    bookC, bookP, bookChange: bookC-bookP,
+    salesC: s.sCurr, salesP: s.sPrev, salesChange: s.sCurr-s.sPrev,
+    revC: s.rCurr, revP: s.rPrev, revChange: s.rCurr-s.rPrev
+  };
+}
 
 function setStatus(msg, type) {
   const el = document.getElementById('status');
@@ -249,7 +293,13 @@ function countBy(leads, fn) {
 
 function pill(text, cls) { return `<span class="pill ${cls}">${text}</span>`; }
 function pctPill(p) { return pill(p+'%', p>=80?'g':p>=50?'b':p>=20?'a':'r'); }
-function changePill(d) { return d>0?pill('+'+d,'g'):d<0?pill(String(d),'r'):pill('0','s'); }
+function changePill(d, currency) {
+  const n = Number(d);
+  const abs = currency ? fmtCurrency(Math.abs(n)) : Math.abs(n);
+  if (n>0) return pill('+'+abs,'g');
+  if (n<0) return pill('-'+abs,'r');
+  return pill(currency?fmtCurrency(0):'0','s');
+}
 
 function tbl(rows, cols) {
   const ths = cols.map(c=>`<th>${c.label}</th>`).join('');
@@ -257,8 +307,8 @@ function tbl(rows, cols) {
     const tds = cols.map(c => {
       const v = r[c.key];
       if (c.pct)    return `<td class="ctr">${pctPill(Number(v))}</td>`;
-      if (c.change) return `<td class="ctr">${changePill(Number(v))}</td>`;
-      if (c.num)    return `<td class="num">${v}</td>`;
+      if (c.change) return `<td class="ctr">${changePill(Number(v), c.currency)}</td>`;
+      if (c.num)    return `<td class="num">${c.currency ? fmtCurrency(v) : v}</td>`;
       return `<td>${v??''}</td>`;
     }).join('');
     return `<tr>${tds}</tr>`;
@@ -291,34 +341,67 @@ function detectDrop(leads) {
   return drop;
 }
 
-function renderChart(leads) {
+const CHART_METRICS = {
+  total:       { label: 'Total Leads' },
+  quotableYes: { label: 'Quotable Yes' },
+  bookingRate: { label: 'Booking Rate' },
+  sales:       { label: 'Sales' },
+  revenue:     { label: 'Revenue' }
+};
+
+function setChartMetric(v) { chartMetric = v; renderAnalysis(); }
+
+function chartMetricSelectHtml() {
+  const opts = Object.keys(CHART_METRICS).map(k =>
+    `<option value="${k}"${k===chartMetric?' selected':''}>${CHART_METRICS[k].label}</option>`).join('');
+  return `<select onchange="setChartMetric(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${opts}</select>`;
+}
+
+function renderChart(leads, metric) {
   const bd = {};
   leads.forEach(l => {
     const d = (l.date_created||l.lead_date||'').slice(0,10);
     if (!d) return;
-    if (!bd[d]) bd[d]={total:0,quot:0,kw:0};
+    if (!bd[d]) bd[d]={total:0,quot:0,kw:0,sales:0,revenue:0};
     bd[d].total++;
     if (l.quotable==='Yes') bd[d].quot++;
     if (l.lead_keyword) bd[d].kw++;
+    if (hasSalesValue(l)) { bd[d].sales++; bd[d].revenue += Number(l.sales_value); }
   });
   const dates = Object.keys(bd).sort();
-  const maxT  = Math.max(...dates.map(d=>bd[d].total),1);
-  const bars  = dates.map(d => {
-    const {total,quot,kw} = bd[d];
-    const kwP = total ? Math.round(kw/total*100) : 0;
+  const label = CHART_METRICS[metric].label;
+
+  const valueFor = d => {
+    const b = bd[d];
+    if (metric==='quotableYes') return b.quot;
+    if (metric==='bookingRate') return b.total ? Math.round(b.quot/b.total*100) : 0;
+    if (metric==='sales')       return b.sales;
+    if (metric==='revenue')     return b.revenue;
+    return b.total;
+  };
+  const fmtVal = v => metric==='revenue' ? fmtCurrency(v) : metric==='bookingRate' ? v+'%' : v;
+
+  const maxV = Math.max(...dates.map(valueFor), 1);
+  const bars = dates.map(d => {
+    const b = bd[d];
+    const v = valueFor(d);
+    const kwP = b.total ? Math.round(b.kw/b.total*100) : 0;
     const op  = kwP>=80?1:kwP>=50?0.75:kwP>=20?0.5:0.3;
-    return `<div class="bar-grp" title="${d}: ${total} leads, ${quot} quotable, ${kwP}% keyword">
+    const secondBar = metric==='total'
+      ? `<div class="bar q" style="height:${Math.round((maxV?b.quot/maxV:0)*90)}px"></div>`
+      : '';
+    return `<div class="bar-grp" title="${d}: ${fmtVal(v)} ${label}, ${b.total} total leads, ${kwP}% keyword">
       <div class="bars">
-        <div class="bar t" style="height:${Math.round(total/maxT*90)}px;opacity:${op}"></div>
-        <div class="bar q" style="height:${Math.round(quot/maxT*90)}px"></div>
+        <div class="bar t" style="height:${Math.round(v/maxV*90)}px;opacity:${op}"></div>
+        ${secondBar}
       </div>
       <div class="bar-lbl">${d.slice(5)}</div>
     </div>`;
   }).join('');
   return `<div class="legend">
-    <div class="leg-item"><div class="leg-dot" style="background:#4c565c"></div>Total Leads</div>
-    <div class="leg-item"><div class="leg-dot" style="background:#aec90b"></div>Quotable Yes</div>
-    <div class="leg-item" style="font-size:10px;color:#a0aec0">Total bar opacity reflects keyword coverage</div>
+    <div class="leg-item"><div class="leg-dot" style="background:#4c565c"></div>${label}</div>
+    ${metric==='total' ? '<div class="leg-item"><div class="leg-dot" style="background:#aec90b"></div>Quotable Yes</div>' : ''}
+    <div class="leg-item" style="font-size:10px;color:#a0aec0">Bar opacity reflects keyword coverage</div>
   </div>
   <div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`;
 }
@@ -342,11 +425,13 @@ async function runAnalysis() {
   setStatus('Fetching leads...','loading');
 
   try {
-    currentLeads = await fetchAllLeads(profileId, dateFrom, dateTo);
+    const rawLeads = await fetchAllLeads(profileId, dateFrom, dateTo);
+    currentLeads = rawLeads.filter(l => l.quotable !== 'Not Set');
     currentDateFrom = dateFrom;
     currentDateTo   = dateTo;
     populateFilterOptions(currentLeads);
-    setStatus(`${currentLeads.length} leads loaded`,'ok');
+    const excluded = rawLeads.length - currentLeads.length;
+    setStatus(`${currentLeads.length} leads loaded (${excluded} excluded — quotable not set)`,'ok');
     renderAnalysis();
   } catch(e) {
     setStatus('Error: ' + e.message,'err');
@@ -368,8 +453,11 @@ function renderAnalysis() {
   const kc=curr.filter(l=>l.lead_keyword).length, kp=prev.filter(l=>l.lead_keyword).length;
   const kwPc=tc?Math.round(kc/tc*100):0, kwPp=tp?Math.round(kp/tp*100):0;
   const qPc=tc?Math.round(qc/tc*100):0;
+  const sc=curr.filter(hasSalesValue).length, sp=prev.filter(hasSalesValue).length;
+  const rc=curr.reduce((sum,l)=>sum+(hasSalesValue(l)?Number(l.sales_value):0),0);
+  const rp=prev.reduce((sum,l)=>sum+(hasSalesValue(l)?Number(l.sales_value):0),0);
 
-  const quotRows = ['Yes','Pending','No','Not Set'].map(v=>({
+  const quotRows = ['Yes','Pending','No'].map(v=>({
     status:v, curr:curr.filter(l=>l.quotable===v).length, prev:prev.filter(l=>l.quotable===v).length,
     change:curr.filter(l=>l.quotable===v).length-prev.filter(l=>l.quotable===v).length,
     pct:tc?Math.round(curr.filter(l=>l.quotable===v).length/tc*100):0
@@ -394,14 +482,14 @@ function renderAnalysis() {
     };
   }).sort((a,b)=>b.curr-a.curr);
 
-  const kwTC=countBy(curr,l=>groupKeyword(l.lead_keyword)), kwTP=countBy(prev,l=>groupKeyword(l.lead_keyword));
-  const kwThemeRows=Object.keys({...kwTC,...kwTP}).filter(k=>k).map(k=>({
-    theme:k,curr:kwTC[k]||0,prev:kwTP[k]||0,change:(kwTC[k]||0)-(kwTP[k]||0)
-  })).sort((a,b)=>b.curr-a.curr);
+  const kwThemeStats = groupStats(curr, prev, l=>groupKeyword(l.lead_keyword));
+  const kwThemeRows = Object.keys(kwThemeStats).filter(k=>k)
+    .map(k => statsToRow('theme', k, kwThemeStats[k]))
+    .sort((a,b)=>b.curr-a.curr);
 
-  const rkC=countBy(curr,l=>l.lead_keyword?.toLowerCase().trim()), rkP=countBy(prev,l=>l.lead_keyword?.toLowerCase().trim());
-  const rawKwRows=Object.keys({...rkC,...rkP}).filter(k=>k&&k!=='undefined'&&k!=='null')
-    .map(k=>({keyword:k,curr:rkC[k]||0,prev:rkP[k]||0,change:(rkC[k]||0)-(rkP[k]||0)}))
+  const rawKwStats = groupStats(curr, prev, l=>l.lead_keyword?.toLowerCase().trim());
+  const rawKwRows = Object.keys(rawKwStats).filter(k=>k&&k!=='undefined'&&k!=='null')
+    .map(k => statsToRow('keyword', k, rawKwStats[k]))
     .sort((a,b)=>b.curr-a.curr).slice(0,30);
 
   const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
@@ -433,16 +521,18 @@ function renderAnalysis() {
         <div class="kpi lime"><div class="kpi-val">${qc}</div><div class="kpi-label">Quotable Yes</div><div class="kpi-sub">prior: ${qp} &bull; ${qPc}% of total</div></div>
         <div class="kpi ${kwPc<50?'amber':''}"><div class="kpi-val">${kwPc}%</div><div class="kpi-label">Keyword Coverage</div><div class="kpi-sub">prior: ${kwPp}%</div></div>
         <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
+        <div class="kpi"><div class="kpi-val">${sc}</div><div class="kpi-label">Sales</div><div class="kpi-sub">prior: ${sp}</div></div>
+        <div class="kpi lime"><div class="kpi-val">${fmtCurrency(rc)}</div><div class="kpi-label">Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(rp)}</div></div>
       </div></div>
     </div>
-    <div class="section"><div class="section-hd">Daily Lead Activity</div><div class="section-bd">${renderChart(leads)}</div></div>
+    <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric)}</div></div>
     <div class="section"><div class="section-hd">Traffic Source / Medium</div><div class="section-bd">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
     <div class="two-col">
       <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
       <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
     </div>
-    <div class="section"><div class="section-hd">Keyword Themes</div><div class="section-bd">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true}])}</div></div>
-    <div class="section"><div class="section-hd">Raw Keywords (top 30)</div><div class="section-bd">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true}])}</div></div>
+    <div class="section"><div class="section-hd">Keyword Themes</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}])}</div></div>
+    <div class="section"><div class="section-hd">Raw Keywords (top 30)</div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}])}</div></div>
     <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
     <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}])}</div></div>
   `;
