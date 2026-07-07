@@ -26,11 +26,11 @@ app.get('/wc/*', (req, res) => {
 
   const wcPath = req.path.replace(/^\/wc/, '');
   const qs     = new URLSearchParams(req.query).toString();
-  const path   = wcPath + (qs ? '?' + qs : '');
+  const path   = '/api' + wcPath + (qs ? '?' + qs : '');
   const auth   = 'Basic ' + Buffer.from(`${WC_TOKEN}:${WC_SECRET}`).toString('base64');
 
   const options = {
-    hostname: 'api.whatconverts.com',
+    hostname: 'app.whatconverts.com',
     port: 443,
     path: path,
     method: 'GET',
