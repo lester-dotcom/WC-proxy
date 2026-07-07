@@ -103,6 +103,17 @@
     </div>
   </div>
 
+  <div class="config" style="border-top:1px solid #e2e8f0">
+    <div class="field" style="min-width:170px">
+      <label>Source</label>
+      <select id="sourceSel" disabled onchange="renderAnalysis()" style="width:170px"><option value="">All Sources</option></select>
+    </div>
+    <div class="field" style="min-width:170px">
+      <label>Medium</label>
+      <select id="mediumSel" disabled onchange="renderAnalysis()" style="width:170px"><option value="">All Mediums</option></select>
+    </div>
+  </div>
+
   <div class="statusbar" id="status"><div class="dot"></div> Enter your Railway proxy URL then load profiles</div>
 
   <div class="main" id="main">
@@ -119,6 +130,10 @@ const today = new Date();
 const d42 = new Date(); d42.setDate(today.getDate() - 42);
 document.getElementById('dateTo').value   = today.toISOString().slice(0,10);
 document.getElementById('dateFrom').value = d42.toISOString().slice(0,10);
+
+let currentLeads = [];
+let currentDateFrom = '';
+let currentDateTo = '';
 
 function setStatus(msg, type) {
   const el = document.getElementById('status');
@@ -173,7 +188,7 @@ async function loadProfiles() {
 async function fetchAllLeads(profileId, dateFrom, dateTo) {
   let page = 1, all = [];
   while (true) {
-    const data = await apiFetch(`/v1/leads?profile_id=${profileId}&date_from=${dateFrom}&date_to=${dateTo}&page=${page}&per_page=500`);
+    const data = await apiFetch(`/v1/leads?profile_id=${profileId}&start_date=${dateFrom}&end_date=${dateTo}&page_number=${page}&leads_per_page=500`);
     const leads = data.leads || [];
     all = all.concat(leads);
     if (leads.length < 500) break;
@@ -181,6 +196,17 @@ async function fetchAllLeads(profileId, dateFrom, dateTo) {
     setStatus(`Fetching... ${all.length} leads loaded`, 'loading');
   }
   return all;
+}
+
+function populateFilterOptions(leads) {
+  const sources = [...new Set(leads.map(l => l.lead_source).filter(Boolean))].sort();
+  const mediums  = [...new Set(leads.map(l => l.lead_medium).filter(Boolean))].sort();
+  const srcSel = document.getElementById('sourceSel');
+  const medSel = document.getElementById('mediumSel');
+  srcSel.innerHTML = '<option value="">All Sources</option>' + sources.map(s => `<option value="${s}">${s}</option>`).join('');
+  medSel.innerHTML = '<option value="">All Mediums</option>' + mediums.map(m => `<option value="${m}">${m}</option>`).join('');
+  srcSel.disabled = false;
+  medSel.disabled = false;
 }
 
 function groupKeyword(kw) {
@@ -233,7 +259,7 @@ function detectDrop(leads) {
     const d = (l.date_created||l.lead_date||'').slice(0,10);
     if (!d) return;
     if (!bd[d]) bd[d]={total:0,kw:0};
-    bd[d].total++; if(l.keyword) bd[d].kw++;
+    bd[d].total++; if(l.lead_keyword) bd[d].kw++;
   });
   let wasHigh=false, drop=null;
   for (const d of Object.keys(bd).sort()) {
@@ -252,7 +278,7 @@ function renderChart(leads) {
     if (!bd[d]) bd[d]={total:0,quot:0,kw:0};
     bd[d].total++;
     if (l.quotable==='Yes') bd[d].quot++;
-    if (l.keyword) bd[d].kw++;
+    if (l.lead_keyword) bd[d].kw++;
   });
   const dates = Object.keys(bd).sort();
   const maxT  = Math.max(...dates.map(d=>bd[d].total),1);
@@ -276,6 +302,12 @@ function renderChart(leads) {
   <div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`;
 }
 
+function getFilteredLeads() {
+  const src = document.getElementById('sourceSel').value;
+  const med = document.getElementById('mediumSel').value;
+  return currentLeads.filter(l => (!src || l.lead_source === src) && (!med || l.lead_medium === med));
+}
+
 async function runAnalysis() {
   const profileId = document.getElementById('profileSel').value;
   const dateFrom  = document.getElementById('dateFrom').value;
@@ -286,87 +318,104 @@ async function runAnalysis() {
   setStatus('Fetching leads...','loading');
 
   try {
-    const leads = await fetchAllLeads(profileId, dateFrom, dateTo);
-    setStatus(`${leads.length} leads loaded`,'ok');
-
-    const {prev,curr} = splitPeriods(leads, dateFrom, dateTo);
-    const midDate = new Date((new Date(dateFrom).getTime()+new Date(dateTo).getTime())/2).toISOString().slice(0,10);
-    const dropDate = detectDrop(leads);
-
-    const tc=curr.length, tp=prev.length;
-    const qc=curr.filter(l=>l.quotable==='Yes').length, qp=prev.filter(l=>l.quotable==='Yes').length;
-    const kc=curr.filter(l=>l.keyword).length, kp=prev.filter(l=>l.keyword).length;
-    const kwPc=tc?Math.round(kc/tc*100):0, kwPp=tp?Math.round(kp/tp*100):0;
-    const qPc=tc?Math.round(qc/tc*100):0;
-
-    const quotRows = ['Yes','Pending','No','Not Set'].map(v=>({
-      status:v, curr:curr.filter(l=>l.quotable===v).length, prev:prev.filter(l=>l.quotable===v).length,
-      change:curr.filter(l=>l.quotable===v).length-prev.filter(l=>l.quotable===v).length,
-      pct:tc?Math.round(curr.filter(l=>l.quotable===v).length/tc*100):0
-    }));
-
-    const ltC=countBy(curr,l=>l.lead_type), ltP=countBy(prev,l=>l.lead_type);
-    const typeRows=Object.keys({...ltC,...ltP}).map(t=>({
-      type:t,curr:ltC[t]||0,prev:ltP[t]||0,change:(ltC[t]||0)-(ltP[t]||0),
-      pct:tc?Math.round((ltC[t]||0)/tc*100):0
-    })).sort((a,b)=>b.curr-a.curr);
-
-    const kwTC=countBy(curr,l=>groupKeyword(l.keyword)), kwTP=countBy(prev,l=>groupKeyword(l.keyword));
-    const kwThemeRows=Object.keys({...kwTC,...kwTP}).filter(k=>k).map(k=>({
-      theme:k,curr:kwTC[k]||0,prev:kwTP[k]||0,change:(kwTC[k]||0)-(kwTP[k]||0)
-    })).sort((a,b)=>b.curr-a.curr);
-
-    const rkC=countBy(curr,l=>l.keyword?.toLowerCase().trim()), rkP=countBy(prev,l=>l.keyword?.toLowerCase().trim());
-    const rawKwRows=Object.keys({...rkC,...rkP}).filter(k=>k&&k!=='undefined'&&k!=='null')
-      .map(k=>({keyword:k,curr:rkC[k]||0,prev:rkP[k]||0,change:(rkC[k]||0)-(rkP[k]||0)}))
-      .sort((a,b)=>b.curr-a.curr).slice(0,30);
-
-    const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
-    const formRows=Object.keys({...fC,...fP}).filter(k=>k&&k!=='undefined').map(k=>{
-      const c=fC[k]||0,p=fP[k]||0,diff=c-p;
-      const st=c===0&&p>0?'Lost':c>0&&p===0?'New':diff<-2?'Declined':diff>2?'Increased':'Stable';
-      return {form:k.length>50?k.slice(0,47)+'...':k,curr:c,prev:p,change:diff,
-        status:st==='Lost'?pill('Lost','r'):st==='New'?pill('New','g'):st==='Declined'?pill('Declined','a'):st==='Increased'?pill('Increased','g'):pill('Stable','s')};
-    }).sort((a,b)=>b.curr-a.curr);
-
-    const bd={};
-    leads.forEach(l=>{
-      const d=(l.date_created||l.lead_date||'').slice(0,10); if(!d) return;
-      if(!bd[d]) bd[d]={total:0,kw:0,quot:0};
-      bd[d].total++; if(l.keyword) bd[d].kw++; if(l.quotable==='Yes') bd[d].quot++;
-    });
-    const dateRows=Object.keys(bd).sort().map(d=>({
-      date:d,total:bd[d].total,kw:bd[d].kw,noKw:bd[d].total-bd[d].kw,
-      kwPct:bd[d].total?Math.round(bd[d].kw/bd[d].total*100):0,
-      quot:bd[d].quot,qPct:bd[d].total?Math.round(bd[d].quot/bd[d].total*100):0
-    }));
-
-    document.getElementById('main').innerHTML = `
-      ${dropDate?`<div class="drop-alert">Keyword tracking drop detected: coverage fell below 50% from <strong>${dropDate}</strong>. Check the WhatConverts script and cookie consent settings around that date.</div>`:''}
-      <div class="section">
-        <div class="section-hd"><span>Overview</span><span class="note">Recent: ${midDate} to ${dateTo} / Prior: ${dateFrom} to ${midDate}</span></div>
-        <div class="section-bd"><div class="kpi-grid">
-          <div class="kpi"><div class="kpi-val">${tc}</div><div class="kpi-label">Total Leads (recent)</div><div class="kpi-sub">prior: ${tp}</div></div>
-          <div class="kpi lime"><div class="kpi-val">${qc}</div><div class="kpi-label">Quotable Yes</div><div class="kpi-sub">prior: ${qp} &bull; ${qPc}% of total</div></div>
-          <div class="kpi ${kwPc<50?'amber':''}"><div class="kpi-val">${kwPc}%</div><div class="kpi-label">Keyword Coverage</div><div class="kpi-sub">prior: ${kwPp}%</div></div>
-          <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
-        </div></div>
-      </div>
-      <div class="section"><div class="section-hd">Daily Lead Activity</div><div class="section-bd">${renderChart(leads)}</div></div>
-      <div class="two-col">
-        <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
-        <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
-      </div>
-      <div class="section"><div class="section-hd">Keyword Themes</div><div class="section-bd">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true}])}</div></div>
-      <div class="section"><div class="section-hd">Raw Keywords (top 30)</div><div class="section-bd">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true}])}</div></div>
-      <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
-      <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}])}</div></div>
-    `;
+    currentLeads = await fetchAllLeads(profileId, dateFrom, dateTo);
+    currentDateFrom = dateFrom;
+    currentDateTo   = dateTo;
+    populateFilterOptions(currentLeads);
+    setStatus(`${currentLeads.length} leads loaded`,'ok');
+    renderAnalysis();
   } catch(e) {
     setStatus('Error: ' + e.message,'err');
     console.error(e);
   }
   document.getElementById('btnRun').disabled = false;
+}
+
+function renderAnalysis() {
+  const leads = getFilteredLeads();
+  const dateFrom = currentDateFrom, dateTo = currentDateTo;
+
+  const {prev,curr} = splitPeriods(leads, dateFrom, dateTo);
+  const midDate = new Date((new Date(dateFrom).getTime()+new Date(dateTo).getTime())/2).toISOString().slice(0,10);
+  const dropDate = detectDrop(leads);
+
+  const tc=curr.length, tp=prev.length;
+  const qc=curr.filter(l=>l.quotable==='Yes').length, qp=prev.filter(l=>l.quotable==='Yes').length;
+  const kc=curr.filter(l=>l.lead_keyword).length, kp=prev.filter(l=>l.lead_keyword).length;
+  const kwPc=tc?Math.round(kc/tc*100):0, kwPp=tp?Math.round(kp/tp*100):0;
+  const qPc=tc?Math.round(qc/tc*100):0;
+
+  const quotRows = ['Yes','Pending','No','Not Set'].map(v=>({
+    status:v, curr:curr.filter(l=>l.quotable===v).length, prev:prev.filter(l=>l.quotable===v).length,
+    change:curr.filter(l=>l.quotable===v).length-prev.filter(l=>l.quotable===v).length,
+    pct:tc?Math.round(curr.filter(l=>l.quotable===v).length/tc*100):0
+  }));
+
+  const ltC=countBy(curr,l=>l.lead_type), ltP=countBy(prev,l=>l.lead_type);
+  const typeRows=Object.keys({...ltC,...ltP}).map(t=>({
+    type:t,curr:ltC[t]||0,prev:ltP[t]||0,change:(ltC[t]||0)-(ltP[t]||0),
+    pct:tc?Math.round((ltC[t]||0)/tc*100):0
+  })).sort((a,b)=>b.curr-a.curr);
+
+  const smKey = l => `${l.lead_source||'(not set)'} / ${l.lead_medium||'(not set)'}`;
+  const smC=countBy(curr,smKey), smP=countBy(prev,smKey);
+  const sourceRows=Object.keys({...smC,...smP}).map(k=>({
+    source:k,curr:smC[k]||0,prev:smP[k]||0,change:(smC[k]||0)-(smP[k]||0),
+    pct:tc?Math.round((smC[k]||0)/tc*100):0
+  })).sort((a,b)=>b.curr-a.curr);
+
+  const kwTC=countBy(curr,l=>groupKeyword(l.lead_keyword)), kwTP=countBy(prev,l=>groupKeyword(l.lead_keyword));
+  const kwThemeRows=Object.keys({...kwTC,...kwTP}).filter(k=>k).map(k=>({
+    theme:k,curr:kwTC[k]||0,prev:kwTP[k]||0,change:(kwTC[k]||0)-(kwTP[k]||0)
+  })).sort((a,b)=>b.curr-a.curr);
+
+  const rkC=countBy(curr,l=>l.lead_keyword?.toLowerCase().trim()), rkP=countBy(prev,l=>l.lead_keyword?.toLowerCase().trim());
+  const rawKwRows=Object.keys({...rkC,...rkP}).filter(k=>k&&k!=='undefined'&&k!=='null')
+    .map(k=>({keyword:k,curr:rkC[k]||0,prev:rkP[k]||0,change:(rkC[k]||0)-(rkP[k]||0)}))
+    .sort((a,b)=>b.curr-a.curr).slice(0,30);
+
+  const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
+  const formRows=Object.keys({...fC,...fP}).filter(k=>k&&k!=='undefined').map(k=>{
+    const c=fC[k]||0,p=fP[k]||0,diff=c-p;
+    const st=c===0&&p>0?'Lost':c>0&&p===0?'New':diff<-2?'Declined':diff>2?'Increased':'Stable';
+    return {form:k.length>50?k.slice(0,47)+'...':k,curr:c,prev:p,change:diff,
+      status:st==='Lost'?pill('Lost','r'):st==='New'?pill('New','g'):st==='Declined'?pill('Declined','a'):st==='Increased'?pill('Increased','g'):pill('Stable','s')};
+  }).sort((a,b)=>b.curr-a.curr);
+
+  const bd={};
+  leads.forEach(l=>{
+    const d=(l.date_created||l.lead_date||'').slice(0,10); if(!d) return;
+    if(!bd[d]) bd[d]={total:0,kw:0,quot:0};
+    bd[d].total++; if(l.lead_keyword) bd[d].kw++; if(l.quotable==='Yes') bd[d].quot++;
+  });
+  const dateRows=Object.keys(bd).sort().map(d=>({
+    date:d,total:bd[d].total,kw:bd[d].kw,noKw:bd[d].total-bd[d].kw,
+    kwPct:bd[d].total?Math.round(bd[d].kw/bd[d].total*100):0,
+    quot:bd[d].quot,qPct:bd[d].total?Math.round(bd[d].quot/bd[d].total*100):0
+  }));
+
+  document.getElementById('main').innerHTML = `
+    ${dropDate?`<div class="drop-alert">Keyword tracking drop detected: coverage fell below 50% from <strong>${dropDate}</strong>. Check the WhatConverts script and cookie consent settings around that date.</div>`:''}
+    <div class="section">
+      <div class="section-hd"><span>Overview</span><span class="note">Recent: ${midDate} to ${dateTo} / Prior: ${dateFrom} to ${midDate}</span></div>
+      <div class="section-bd"><div class="kpi-grid">
+        <div class="kpi"><div class="kpi-val">${tc}</div><div class="kpi-label">Total Leads (recent)</div><div class="kpi-sub">prior: ${tp}</div></div>
+        <div class="kpi lime"><div class="kpi-val">${qc}</div><div class="kpi-label">Quotable Yes</div><div class="kpi-sub">prior: ${qp} &bull; ${qPc}% of total</div></div>
+        <div class="kpi ${kwPc<50?'amber':''}"><div class="kpi-val">${kwPc}%</div><div class="kpi-label">Keyword Coverage</div><div class="kpi-sub">prior: ${kwPp}%</div></div>
+        <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
+      </div></div>
+    </div>
+    <div class="section"><div class="section-hd">Daily Lead Activity</div><div class="section-bd">${renderChart(leads)}</div></div>
+    <div class="section"><div class="section-hd">Traffic Source / Medium</div><div class="section-bd">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
+    <div class="two-col">
+      <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
+      <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
+    </div>
+    <div class="section"><div class="section-hd">Keyword Themes</div><div class="section-bd">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true}])}</div></div>
+    <div class="section"><div class="section-hd">Raw Keywords (top 30)</div><div class="section-bd">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true}])}</div></div>
+    <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Recent',key:'curr',num:true},{label:'Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
+    <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}])}</div></div>
+  `;
 }
 </script>
 </body>
