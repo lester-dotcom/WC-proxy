@@ -85,6 +85,10 @@
       <label>Proxy URL (your Railway deployment)</label>
       <input type="text" id="proxyBase" value="https://wc-proxy-production.up.railway.app" placeholder="https://your-wc-proxy.up.railway.app" style="width:320px">
     </div>
+    <div class="field" style="min-width:280px">
+      <label>Ads Sheet CSV URL</label>
+      <input type="text" id="adsSheetUrl" value="https://docs.google.com/spreadsheets/d/e/2PACX-1vQuGxyRP78S2z4h5FbZ1BKETHGkL6cjASko-CA5CpmPFUWp7UaNiyXMek7j5VpA0HhId-PnJCfAxyU8/pub?gid=1974587501&single=true&output=csv" placeholder="Published Google Sheet CSV URL (optional)" style="width:320px">
+    </div>
     <div class="field" style="min-width:200px">
       <label>Profile</label>
       <select id="profileSel" disabled style="width:220px"><option value="">-- load profiles first --</option></select>
@@ -136,9 +140,103 @@ document.getElementById('dateFrom').value = d42.toISOString().slice(0,10);
 if (proxyBase()) { loadProfiles(); }
 
 let currentLeads = [];
+let currentAdsSpend = [];
 let currentDateFrom = '';
 let currentDateTo = '';
 let chartMetric = 'total';
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i+1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i+1] === '\n') i++;
+      row.push(field); field = '';
+      rows.push(row); row = [];
+    } else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.length > 1 || r[0] !== '');
+}
+
+// Reads the daily keyword-level spend export (see ads-daily-spend-export.js)
+// published from Google Sheets as CSV. Best-effort: a bad/missing URL just
+// means no spend/ROAS data, not a failed analysis.
+async function fetchAdsSpend(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Ads sheet fetch failed: ${res.status}`);
+  const rows = parseCsv(await res.text());
+  const header = rows[0] || [];
+  const idx = name => header.indexOf(name);
+  const i = {
+    date: idx('Date'), campaignId: idx('Campaign ID'), campaignName: idx('Campaign Name'),
+    adGroupId: idx('Ad Group ID'), adGroupName: idx('Ad Group Name'),
+    keywordId: idx('Keyword ID'), keywordText: idx('Keyword Text'), matchType: idx('Match Type'),
+    cost: idx('Cost'), clicks: idx('Clicks'), impressions: idx('Impressions'),
+    conversions: idx('Conversions'), convValue: idx('Conv. Value')
+  };
+  return rows.slice(1).map(r => ({
+    date: r[i.date],
+    campaignId: r[i.campaignId],
+    campaignName: r[i.campaignName],
+    adGroupId: r[i.adGroupId],
+    adGroupName: r[i.adGroupName],
+    keywordId: r[i.keywordId],
+    keywordText: r[i.keywordText],
+    matchType: r[i.matchType],
+    cost: Number(r[i.cost])||0,
+    clicks: Number(r[i.clicks])||0,
+    impressions: Number(r[i.impressions])||0,
+    conversions: Number(r[i.conversions])||0,
+    convValue: Number(r[i.convValue])||0
+  }));
+}
+
+function splitAdsPeriods(adsRows, dateFrom, dateTo) {
+  const from = new Date(dateFrom).getTime();
+  const to = new Date(dateTo).getTime() + 86399999; // include the full end day
+  const mid = (new Date(dateFrom).getTime() + new Date(dateTo).getTime()) / 2;
+  const inRange = adsRows.filter(r => {
+    const t = new Date(r.date).getTime();
+    return t >= from && t <= to;
+  });
+  return {
+    prev: inRange.filter(r => new Date(r.date).getTime() <= mid),
+    curr: inRange.filter(r => new Date(r.date).getTime() > mid)
+  };
+}
+
+// Same shape as groupStats but for ads spend rows (cost/clicks only — ads
+// data has no "quotable"/"sales" concept of its own, those come from the
+// joined WhatConverts leads).
+function groupAdsSpend(adsCurr, adsPrev, keyFn) {
+  const stats = {};
+  const ensure = k => stats[k] || (stats[k] = {spendCurr:0, spendPrev:0});
+  adsCurr.forEach(r => { const k=keyFn(r); if(k==null) return; const s=ensure(k); s.spendCurr += r.cost; });
+  adsPrev.forEach(r => { const k=keyFn(r); if(k==null) return; const s=ensure(k); s.spendPrev += r.cost; });
+  return stats;
+}
+
+function applySpendToRow(row, spendStats) {
+  const s = spendStats || {spendCurr:0, spendPrev:0};
+  row.spendC = s.spendCurr;
+  row.spendP = s.spendPrev;
+  row.spendChange = s.spendCurr - s.spendPrev;
+  row.roasC = s.spendCurr ? row.revC/s.spendCurr : null;
+  row.roasP = s.spendPrev ? row.revP/s.spendPrev : null;
+  return row;
+}
+
+function showCampaignLeads(encodedKey, encodedLabel) {
+  const campaignId = decodeURIComponent(encodedKey);
+  openLeadsWindow(lastRenderedLeads.filter(l => String(l.lead_campaign) === campaignId), decodeURIComponent(encodedLabel));
+}
 
 // Populated on each render so the drill-down links can look up which leads
 // belong to the clicked row, and so the summary download reflects exactly
@@ -338,6 +436,7 @@ function downloadSummary() {
       <li><strong>${d.qPc}%</strong> of leads were marked as bookable, ${trendClause(d.qPc, d.qPp, v=>v+'%')}.</li>
       <li><strong>${d.sc} leads</strong> converted into a sale, generating <strong>${fmtCurrency(d.rc)}</strong> in revenue, ${trendClause(d.rc, d.rp, fmtCurrency)}.</li>
       <li><strong>${d.kwPc}%</strong> of leads had keyword tracking data available, ${trendClause(d.kwPc, d.kwPp, v=>v+'%')}.</li>
+      ${d.spendC ? `<li>Google Ads spend was <strong>${fmtCurrency(d.spendC)}</strong>, ${trendClause(d.spendC, d.spendP, fmtCurrency)}, giving a ROAS of <strong>${d.roasC!=null?d.roasC.toFixed(2)+'x':'n/a'}</strong>${d.roasP!=null?` (prior: ${d.roasP.toFixed(2)}x)`:''}.</li>` : ''}
     </ul>
     <h2>Top Performing Themes</h2>
     <table><thead><tr><th>Theme</th><th>Leads</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${themeRows}</tbody></table>
@@ -528,18 +627,24 @@ function changePill(d, currency) {
   return pill(currency?fmtCurrency(0):'0','s');
 }
 
+function roasPill(v) {
+  if (v == null) return pill('–','s');
+  return pill(v.toFixed(2)+'x', v>=4?'g':v>=1?'b':'r');
+}
+const sortNum = v => v==null || Number.isNaN(Number(v)) ? -Infinity : Number(v);
+
 function tbl(rows, cols, opts) {
   opts = opts || {};
-  const clsFor = c => (c.pct||c.change) ? 'ctr' : c.num ? 'num' : '';
+  const clsFor = c => (c.pct||c.change||c.roas) ? 'ctr' : c.num ? 'num' : '';
 
   const sortState = opts.tableId ? tableSortState[opts.tableId] : null;
   let displayRows = rows;
   if (sortState) {
     const col = cols.find(c => c.key === sortState.colKey);
-    const numeric = col && (col.num || col.pct || col.change);
+    const numeric = col && (col.num || col.pct || col.change || col.roas);
     displayRows = rows.slice().sort((a,b) => {
       const av = a[sortState.colKey], bv = b[sortState.colKey];
-      const cmp = numeric ? (Number(av)-Number(bv)) : String(av??'').localeCompare(String(bv??''));
+      const cmp = numeric ? (sortNum(av)-sortNum(bv)) : String(av??'').localeCompare(String(bv??''));
       return sortState.dir === 'asc' ? cmp : -cmp;
     });
   }
@@ -557,6 +662,7 @@ function tbl(rows, cols, opts) {
       let content;
       if (c.pct)    content = pctPill(Number(v));
       else if (c.change) content = changePill(Number(v), c.currency);
+      else if (c.roas)   content = roasPill(v);
       else if (c.num)    content = c.currency ? fmtCurrency(v) : v;
       else content = v??'';
       if (ci===0 && opts.rowClick) {
@@ -600,7 +706,9 @@ const CHART_METRICS = {
   quotableYes: { label: 'Quotable Yes' },
   bookingRate: { label: 'Booking Rate' },
   sales:       { label: 'Sales' },
-  revenue:     { label: 'Revenue' }
+  revenue:     { label: 'Revenue' },
+  spend:       { label: 'Ad Spend' },
+  roas:        { label: 'ROAS' }
 };
 
 function setChartMetric(v) { chartMetric = v; renderAnalysis(); }
@@ -611,16 +719,21 @@ function chartMetricSelectHtml() {
   return `<select onchange="setChartMetric(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${opts}</select>`;
 }
 
-function renderChart(leads, metric) {
+function renderChart(leads, metric, adsRows) {
   const bd = {};
+  const ensureDay = d => bd[d] || (bd[d] = {total:0,quot:0,kw:0,sales:0,revenue:0,spend:0});
   leads.forEach(l => {
     const d = (l.date_created||l.lead_date||'').slice(0,10);
     if (!d) return;
-    if (!bd[d]) bd[d]={total:0,quot:0,kw:0,sales:0,revenue:0};
-    bd[d].total++;
-    if (l.quotable==='Yes') bd[d].quot++;
-    if (l.lead_keyword) bd[d].kw++;
-    if (hasSalesValue(l)) { bd[d].sales++; bd[d].revenue += Number(l.sales_value); }
+    const b = ensureDay(d);
+    b.total++;
+    if (l.quotable==='Yes') b.quot++;
+    if (l.lead_keyword) b.kw++;
+    if (hasSalesValue(l)) { b.sales++; b.revenue += Number(l.sales_value); }
+  });
+  (adsRows||[]).forEach(r => {
+    if (!r.date) return;
+    ensureDay(r.date).spend += r.cost;
   });
   const dates = Object.keys(bd).sort();
   const label = CHART_METRICS[metric].label;
@@ -631,9 +744,11 @@ function renderChart(leads, metric) {
     if (metric==='bookingRate') return b.total ? Math.round(b.quot/b.total*100) : 0;
     if (metric==='sales')       return b.sales;
     if (metric==='revenue')     return b.revenue;
+    if (metric==='spend')       return b.spend;
+    if (metric==='roas')        return b.spend ? b.revenue/b.spend : 0;
     return b.total;
   };
-  const fmtVal = v => metric==='revenue' ? fmtCurrency(v) : metric==='bookingRate' ? v+'%' : v;
+  const fmtVal = v => (metric==='revenue'||metric==='spend') ? fmtCurrency(v) : metric==='bookingRate' ? v+'%' : metric==='roas' ? v.toFixed(2)+'x' : v;
 
   const maxV = Math.max(...dates.map(valueFor), 1);
   const bars = dates.map(d => {
@@ -683,7 +798,18 @@ async function runAnalysis() {
     currentDateTo   = dateTo;
     populateFilterOptions(currentLeads);
     const excluded = rawLeads.length - currentLeads.length;
-    setStatus(`${currentLeads.length} leads loaded (${excluded} excluded — quotable not set)`,'ok');
+
+    // Ad spend is a bonus layer, not core to the analysis — a bad/missing
+    // sheet URL shouldn't stop leads from rendering, just skip spend/ROAS.
+    const adsSheetUrl = document.getElementById('adsSheetUrl').value.trim();
+    currentAdsSpend = [];
+    let adsError = '';
+    if (adsSheetUrl) {
+      try { currentAdsSpend = await fetchAdsSpend(adsSheetUrl); }
+      catch(e) { adsError = ' (ad spend fetch failed: ' + e.message + ')'; console.error(e); }
+    }
+
+    setStatus(`${currentLeads.length} leads loaded (${excluded} excluded — quotable not set)${adsError}`, adsError?'err':'ok');
     renderAnalysis();
   } catch(e) {
     setStatus('Error: ' + e.message,'err');
@@ -709,6 +835,12 @@ function renderAnalysis() {
   const rc=curr.reduce((sum,l)=>sum+(hasSalesValue(l)?Number(l.sales_value):0),0);
   const rp=prev.reduce((sum,l)=>sum+(hasSalesValue(l)?Number(l.sales_value):0),0);
 
+  const { curr: adsCurr, prev: adsPrev } = splitAdsPeriods(currentAdsSpend, dateFrom, dateTo);
+  const spendC = adsCurr.reduce((sum,r)=>sum+r.cost,0);
+  const spendP = adsPrev.reduce((sum,r)=>sum+r.cost,0);
+  const roasC = spendC ? rc/spendC : null;
+  const roasP = spendP ? rp/spendP : null;
+
   const quotRows = ['Yes','Pending','No'].map(v=>({
     status:v, curr:curr.filter(l=>l.quotable===v).length, prev:prev.filter(l=>l.quotable===v).length,
     change:curr.filter(l=>l.quotable===v).length-prev.filter(l=>l.quotable===v).length,
@@ -732,14 +864,36 @@ function renderAnalysis() {
     return row;
   }).sort((a,b)=>b.curr-a.curr);
 
+  // Campaign ID is the reliable join key WhatConverts auto-tags into
+  // lead_campaign for Google Ads leads (see ads-daily-spend-export.js) —
+  // far less fragile than matching on free-text keyword content.
+  const campNameMap = {};
+  currentAdsSpend.forEach(r => { campNameMap[r.campaignId] = r.campaignName; });
+  const campSpendStats = groupAdsSpend(adsCurr, adsPrev, r => r.campaignId);
+  const campLeadStats = groupStats(curr, prev, l => l.lead_campaign);
+  const campaignIds = new Set([...Object.keys(campSpendStats), ...Object.keys(campLeadStats)]);
+  const campaignRows = [...campaignIds].filter(id=>id).map(id => {
+    const row = statsToRow('campaign', campNameMap[id] || id, campLeadStats[id] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0});
+    row.campaignId = id;
+    return applySpendToRow(row, campSpendStats[id]);
+  }).sort((a,b)=>b.spendC-a.spendC);
+
+  // Keyword-text matching for the keyword-level tables: ads keywords with
+  // spend but no matching WC lead are still included (0 leads / real
+  // spend), so wasted-spend keywords surface via the Spend/ROAS columns
+  // even if they never converted.
+  const adsThemeStats = groupAdsSpend(adsCurr, adsPrev, r => groupKeyword(r.keywordText));
   const kwThemeStats = groupStats(curr, prev, l=>groupKeyword(l.lead_keyword));
-  const kwThemeRows = Object.keys(kwThemeStats).filter(k=>k)
-    .map(k => statsToRow('theme', k, kwThemeStats[k]))
+  const themeKeys = new Set([...Object.keys(kwThemeStats), ...Object.keys(adsThemeStats)]);
+  const kwThemeRows = [...themeKeys].filter(k=>k)
+    .map(k => applySpendToRow(statsToRow('theme', k, kwThemeStats[k] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0}), adsThemeStats[k]))
     .sort((a,b)=>b.curr-a.curr);
 
+  const adsKwStats = groupAdsSpend(adsCurr, adsPrev, r => (r.keywordText||'').toLowerCase().trim());
   const rawKwStats = groupStats(curr, prev, l=>l.lead_keyword?.toLowerCase().trim());
-  const rawKwRows = Object.keys(rawKwStats).filter(k=>k&&k!=='undefined'&&k!=='null')
-    .map(k => statsToRow('keyword', k, rawKwStats[k]))
+  const rawKwKeys = new Set([...Object.keys(rawKwStats), ...Object.keys(adsKwStats)]);
+  const rawKwRows = [...rawKwKeys].filter(k=>k&&k!=='undefined'&&k!=='null')
+    .map(k => applySpendToRow(statsToRow('keyword', k, rawKwStats[k] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0}), adsKwStats[k]))
     .sort((a,b)=>b.curr-a.curr).slice(0,30);
 
   lastRenderedLeads = leads;
@@ -764,7 +918,15 @@ function renderAnalysis() {
     quot:bd[d].quot,qPct:bd[d].total?Math.round(bd[d].quot/bd[d].total*100):0
   }));
 
-  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, midDate, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, kwThemeRows, sourceRows };
+  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, midDate, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, spendC, spendP, roasC, roasP, kwThemeRows, sourceRows, campaignRows };
+
+  const SPEND_ROAS_COLS = [
+    {label:'Spend',key:'spendC',num:true,currency:true},
+    {label:'Spend (Prior)',key:'spendP',num:true,currency:true},
+    {label:'Spend Δ',key:'spendChange',change:true,currency:true},
+    {label:'ROAS',key:'roasC',roas:true},
+    {label:'ROAS (Prior)',key:'roasP',roas:true}
+  ];
 
   document.getElementById('main').innerHTML = `
     ${dropDate?`<div class="drop-alert">Keyword tracking drop detected: coverage fell below 50% from <strong>${dropDate}</strong>. Check the WhatConverts script and cookie consent settings around that date.</div>`:''}
@@ -782,16 +944,19 @@ function renderAnalysis() {
         <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
         <div class="kpi"><div class="kpi-val">${sc}</div><div class="kpi-label">Sales</div><div class="kpi-sub">prior: ${sp}</div></div>
         <div class="kpi lime"><div class="kpi-val">${fmtCurrency(rc)}</div><div class="kpi-label">Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(rp)}</div></div>
+        <div class="kpi"><div class="kpi-val">${fmtCurrency(spendC)}</div><div class="kpi-label">Ad Spend (Google Ads)</div><div class="kpi-sub">prior: ${fmtCurrency(spendP)}</div></div>
+        <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
       </div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric)}</div></div>
+    <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric, [...adsCurr, ...adsPrev])}</div></div>
     <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span></div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign'})}</div></div>
     <div class="two-col">
       <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
       <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showThemeLeads', tableId:'kwTheme'})}</div></div>
-    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30)</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showKeywordLeads', tableId:'rawKw'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30 by lead count)</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showKeywordLeads', tableId:'rawKw'})}</div></div>
     <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
     <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}], {tableId:'kwByDate'})}</div></div>
   `;
