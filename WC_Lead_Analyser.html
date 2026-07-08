@@ -409,10 +409,11 @@ function downloadSummary() {
     ? `Filtered to ${[srcLabel&&('Source = '+srcLabel), medLabel&&('Medium = '+medLabel)].filter(Boolean).join(', ')}`
     : 'All traffic sources and mediums included';
 
+  const changeText = n => n>0 ? `+${n}` : String(n);
   const themeRows = d.kwThemeRows.slice(0,5)
-    .map(t => `<tr><td>${t.theme}</td><td>${t.curr}</td><td>${t.bookC}%</td><td>${fmtCurrency(t.revC)}</td></tr>`).join('');
+    .map(t => `<tr><td>${t.theme}</td><td>${t.curr}</td><td>${t.prev}</td><td>${changeText(t.change)}</td><td>${t.bookC}%</td><td>${fmtCurrency(t.revC)}</td></tr>`).join('');
   const sourceRowsHtml = d.sourceRows.slice(0,5)
-    .map(s => `<tr><td>${s.source}</td><td>${s.curr}</td><td>${s.bookC}%</td><td>${fmtCurrency(s.revC)}</td></tr>`).join('');
+    .map(s => `<tr><td>${s.source}</td><td>${s.curr}</td><td>${s.prev}</td><td>${changeText(s.change)}</td><td>${s.bookC}%</td><td>${fmtCurrency(s.revC)}</td></tr>`).join('');
 
   const filename = `lead-summary-${d.dateFrom}-to-${d.dateTo}.html`;
   const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lead Performance Summary</title><style>
@@ -436,12 +437,12 @@ function downloadSummary() {
       <li><strong>${d.qPc}%</strong> of leads were marked as bookable, ${trendClause(d.qPc, d.qPp, v=>v+'%')}.</li>
       <li><strong>${d.sc} leads</strong> converted into a sale, generating <strong>${fmtCurrency(d.rc)}</strong> in revenue, ${trendClause(d.rc, d.rp, fmtCurrency)}.</li>
       <li><strong>${d.kwPc}%</strong> of leads had keyword tracking data available, ${trendClause(d.kwPc, d.kwPp, v=>v+'%')}.</li>
-      ${d.spendC ? `<li>Google Ads spend was <strong>${fmtCurrency(d.spendC)}</strong>, ${trendClause(d.spendC, d.spendP, fmtCurrency)}, giving a ROAS of <strong>${d.roasC!=null?d.roasC.toFixed(2)+'x':'n/a'}</strong>${d.roasP!=null?` (prior: ${d.roasP.toFixed(2)}x)`:''}.</li>` : ''}
+      ${d.spendC ? `<li>Google Ads spend was <strong>${fmtCurrency(d.spendC)}</strong>, ${trendClause(d.spendC, d.spendP, fmtCurrency)}, against <strong>${fmtCurrency(d.cpcRevC)}</strong> in CPC-attributed revenue — a ROAS of <strong>${d.roasC!=null?d.roasC.toFixed(2)+'x':'n/a'}</strong>${d.roasP!=null?` (prior: ${d.roasP.toFixed(2)}x)`:''}.</li>` : ''}
     </ul>
     <h2>Top Performing Themes</h2>
-    <table><thead><tr><th>Theme</th><th>Leads</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${themeRows}</tbody></table>
+    <table><thead><tr><th>Theme</th><th>Recent</th><th>Prior</th><th>Change</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${themeRows}</tbody></table>
     <h2>Top Traffic Sources</h2>
-    <table><thead><tr><th>Source / Medium</th><th>Leads</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${sourceRowsHtml}</tbody></table>
+    <table><thead><tr><th>Source / Medium</th><th>Recent</th><th>Prior</th><th>Change</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${sourceRowsHtml}</tbody></table>
   </body></html>`;
   // See the comment in openLeadsWindow: no inline <script> here, for the
   // same reason (it would prematurely close this page's own script tag).
@@ -620,17 +621,25 @@ function groupKeyword(kw) {
 // in detail. Bucketing these instead of dropping them keeps the Campaign
 // Performance and keyword tables from silently losing real leads/revenue.
 const NOT_TRACKED_LABEL = 'Not Tracked (Google CPC)';
-function isUntrackedGoogleCpc(l) {
+function isGoogleCpc(l) {
   return (l.lead_source||'').toLowerCase().trim() === 'google' && (l.lead_medium||'').toLowerCase().trim() === 'cpc';
 }
+// Campaign Performance and both keyword tables now pair with Google Ads
+// spend data, so a lead must actually be google/cpc to appear in them —
+// otherwise a Facebook or GMB lead whose lead_campaign/lead_keyword field
+// happens to be populated (with a Meta campaign name, an ad name, etc.)
+// would show up mixed in with real Google Ads performance.
 function campaignKey(l) {
-  return l.lead_campaign || (isUntrackedGoogleCpc(l) ? 'NOT_TRACKED_CPC' : null);
+  if (!isGoogleCpc(l)) return null;
+  return l.lead_campaign || 'NOT_TRACKED_CPC';
 }
 function themeKey(l) {
-  return l.lead_keyword ? groupKeyword(l.lead_keyword) : (isUntrackedGoogleCpc(l) ? NOT_TRACKED_LABEL : null);
+  if (!isGoogleCpc(l)) return null;
+  return l.lead_keyword ? groupKeyword(l.lead_keyword) : NOT_TRACKED_LABEL;
 }
 function rawKeywordKey(l) {
-  return l.lead_keyword ? l.lead_keyword.toLowerCase().trim() : (isUntrackedGoogleCpc(l) ? '(not tracked — google cpc)' : null);
+  if (!isGoogleCpc(l)) return null;
+  return l.lead_keyword ? l.lead_keyword.toLowerCase().trim() : '(not tracked — google cpc)';
 }
 
 function countBy(leads, fn) {
@@ -858,8 +867,14 @@ function renderAnalysis() {
   const { curr: adsCurr, prev: adsPrev } = splitAdsPeriods(currentAdsSpend, dateFrom, dateTo);
   const spendC = adsCurr.reduce((sum,r)=>sum+r.cost,0);
   const spendP = adsPrev.reduce((sum,r)=>sum+r.cost,0);
-  const roasC = spendC ? rc/spendC : null;
-  const roasP = spendP ? rp/spendP : null;
+  // ROAS should only weigh revenue the spend could plausibly have driven —
+  // blending in organic/direct/Facebook revenue against Google Ads spend
+  // would overstate it. isGoogleCpc catches tracked and untracked-but-still-
+  // cpc leads alike (see campaignKey/themeKey above).
+  const cpcRevC = curr.filter(isGoogleCpc).reduce((sum,l)=>sum+(hasSalesValue(l)?Number(l.sales_value):0),0);
+  const cpcRevP = prev.filter(isGoogleCpc).reduce((sum,l)=>sum+(hasSalesValue(l)?Number(l.sales_value):0),0);
+  const roasC = spendC ? cpcRevC/spendC : null;
+  const roasP = spendP ? cpcRevP/spendP : null;
 
   const quotRows = ['Yes','Pending','No'].map(v=>({
     status:v, curr:curr.filter(l=>l.quotable===v).length, prev:prev.filter(l=>l.quotable===v).length,
@@ -939,7 +954,7 @@ function renderAnalysis() {
     quot:bd[d].quot,qPct:bd[d].total?Math.round(bd[d].quot/bd[d].total*100):0
   }));
 
-  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, midDate, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, spendC, spendP, roasC, roasP, kwThemeRows, sourceRows, campaignRows };
+  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, midDate, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, cpcRevC, cpcRevP, spendC, spendP, roasC, roasP, kwThemeRows, sourceRows, campaignRows };
 
   const SPEND_ROAS_COLS = [
     {label:'Spend',key:'spendC',num:true,currency:true},
@@ -965,8 +980,9 @@ function renderAnalysis() {
         <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
         <div class="kpi"><div class="kpi-val">${sc}</div><div class="kpi-label">Sales</div><div class="kpi-sub">prior: ${sp}</div></div>
         <div class="kpi lime"><div class="kpi-val">${fmtCurrency(rc)}</div><div class="kpi-label">Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(rp)}</div></div>
+        <div class="kpi"><div class="kpi-val">${fmtCurrency(cpcRevC)}</div><div class="kpi-label">CPC Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(cpcRevP)}</div></div>
         <div class="kpi"><div class="kpi-val">${fmtCurrency(spendC)}</div><div class="kpi-label">Ad Spend (Google Ads)</div><div class="kpi-sub">prior: ${fmtCurrency(spendP)}</div></div>
-        <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
+        <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS (CPC Revenue / Spend)</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
       </div></div>
     </div>
     <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric, [...adsCurr, ...adsPrev])}</div></div>
