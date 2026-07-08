@@ -164,52 +164,104 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
 }
 
+// Column defs for the leads drill-down popup. "key" holds the raw value used
+// for sorting; "display" (when present) is the formatted string shown/exported
+// instead — needed for Sale, where sorting must compare the numeric amount but
+// display the formatted currency.
+const LEADS_POPUP_COLS = [
+  { label: 'Date', key: 'date' },
+  { label: 'Name', key: 'name' },
+  { label: 'Email', key: 'email' },
+  { label: 'Phone', key: 'phone' },
+  { label: 'Type', key: 'type' },
+  { label: 'Quotable', key: 'quotable' },
+  { label: 'Sale', key: 'saleRaw', display: 'saleDisplay', numeric: true },
+  { label: 'Source / Medium', key: 'sourceMedium' }
+];
+
+function leadsPopupRowsHtml(data) {
+  return data.map(r => `<tr>${LEADS_POPUP_COLS.map(c => `<td>${r[c.display||c.key] ?? ''}</td>`).join('')}</tr>`).join('');
+}
+
+function leadsPopupCsvText(data) {
+  const rows = [LEADS_POPUP_COLS.map(c=>c.label), ...data.map(r => LEADS_POPUP_COLS.map(c => r[c.display||c.key] ?? ''))];
+  return rows.map(r => r.map(csvEscape).join(',')).join('\n');
+}
+
 function openLeadsWindow(matchingLeads, title) {
-  const sorted = matchingLeads.slice()
-    .sort((a,b) => new Date(b.date_created||b.lead_date||0) - new Date(a.date_created||a.lead_date||0));
-  const cols = ['Date','Name','Email','Phone','Type','Quotable','Sale','Source / Medium'];
-  const rowData = sorted.map(l => [
-    (l.date_created||l.lead_date||'').slice(0,10),
-    l.contact_name||'',
-    l.contact_email_address||l.email_address||'',
-    l.contact_phone_number||l.phone_number||'',
-    l.lead_type||'',
-    l.quotable||'',
-    hasSalesValue(l)?fmtCurrency(l.sales_value):'',
-    `${l.lead_source||''} / ${l.lead_medium||''}`
-  ]);
-  const rows = rowData.map(r => `<tr>${r.map(v=>`<td>${v}</td>`).join('')}</tr>`).join('');
-  const csvText = [cols, ...rowData].map(r => r.map(csvEscape).join(',')).join('\n');
+  const leadsData = matchingLeads
+    .map(l => ({
+      date: (l.date_created||l.lead_date||'').slice(0,10),
+      name: l.contact_name||'',
+      email: l.contact_email_address||l.email_address||'',
+      phone: l.contact_phone_number||l.phone_number||'',
+      type: l.lead_type||'',
+      quotable: l.quotable||'',
+      saleRaw: hasSalesValue(l) ? Number(l.sales_value) : null,
+      saleDisplay: hasSalesValue(l) ? fmtCurrency(l.sales_value) : '',
+      sourceMedium: `${l.lead_source||''} / ${l.lead_medium||''}`
+    }))
+    .sort((a,b) => new Date(b.date) - new Date(a.date));
+
   const fileSlug = title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'leads';
   const html = `<!DOCTYPE html><html><head><title>${title} — Leads</title><meta charset="UTF-8"><style>
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:24px;color:#2d3748;background:#f4f5f7}
     h1{font-size:16px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
     .btn{border:none;border-radius:5px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;background:#aec90b;color:#2d3748}
     table{border-collapse:collapse;width:100%;background:#fff;border-radius:8px;overflow:hidden;border:1px solid #e2e8f0}
-    th{background:#f8fafc;color:#718096;text-align:left;padding:8px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:2px solid #e2e8f0;border-right:1px solid #e9edf1}
+    th{background:#f8fafc;color:#718096;text-align:left;padding:8px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;border-bottom:2px solid #e2e8f0;border-right:1px solid #e9edf1;cursor:pointer;user-select:none}
     td{padding:7px 10px;border-bottom:1px solid #f0f4f8;border-right:1px solid #f0f4f8}
     th:last-child,td:last-child{border-right:none}
     tr:last-child td{border-bottom:none}
   </style></head><body>
     <h1><span>${title} — ${matchingLeads.length} lead${matchingLeads.length===1?'':'s'}</span><button class="btn" id="dl">Download CSV</button></h1>
-    <table><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
-    <tbody>${rows}</tbody></table>
+    <table><thead><tr>${LEADS_POPUP_COLS.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${leadsPopupRowsHtml(leadsData)}</tbody></table>
   </body></html>`;
   // Deliberately no inline script tag inside the html string above: its closing
   // tag text would be read by the browser's HTML parser as ending this page's
   // own outer script block, silently truncating the rest of the app's JS.
-  // Instead we attach the download handler here once the popup (a same-origin
-  // blob: URL) has loaded.
+  // Instead we attach the sort/download handlers here once the popup (a
+  // same-origin blob: URL) has loaded.
   const win = window.open(URL.createObjectURL(new Blob([html], {type: 'text/html'})), '_blank');
   if (win) {
     win.addEventListener('load', () => {
-      const btn = win.document.getElementById('dl');
+      const doc = win.document;
+      const tbody = doc.querySelector('tbody');
+      const ths = [...doc.querySelectorAll('th')];
+      let currentData = leadsData;
+      let sortState = null;
+
+      ths.forEach((th, i) => {
+        th.onclick = () => {
+          if (sortState && sortState.colIdx === i) {
+            sortState.dir = sortState.dir === 'desc' ? 'asc' : 'desc';
+          } else {
+            sortState = { colIdx: i, dir: 'desc' };
+          }
+          const c = LEADS_POPUP_COLS[i];
+          currentData = leadsData.slice().sort((a,b) => {
+            const av = a[c.key], bv = b[c.key];
+            const cmp = c.numeric
+              ? (av==null?-Infinity:av) - (bv==null?-Infinity:bv)
+              : String(av??'').localeCompare(String(bv??''));
+            return sortState.dir === 'asc' ? cmp : -cmp;
+          });
+          tbody.innerHTML = leadsPopupRowsHtml(currentData);
+          ths.forEach((t,ti) => {
+            const arrow = sortState.colIdx===ti ? (sortState.dir==='desc'?' ▼':' ▲') : '';
+            t.textContent = LEADS_POPUP_COLS[ti].label + arrow;
+          });
+        };
+      });
+
+      const btn = doc.getElementById('dl');
       if (!btn) return;
       btn.onclick = () => {
-        const a = win.document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([csvText], {type: 'text/csv'}));
+        const a = doc.createElement('a');
+        a.href = URL.createObjectURL(new Blob([leadsPopupCsvText(currentData)], {type: 'text/csv'}));
         a.download = fileSlug + '.csv';
-        win.document.body.appendChild(a);
+        doc.body.appendChild(a);
         a.click();
         a.remove();
       };
