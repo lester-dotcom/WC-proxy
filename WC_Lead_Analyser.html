@@ -58,8 +58,14 @@
   .pill.s { background: #f0f4f8; color: #4a5568; }
   .drop-alert { background: #fff5f5; border: 1px solid #fc8181; border-radius: 6px; padding: 12px 16px; font-size: 12px; color: #742a2a; }
   .drop-alert strong { color: #c53030; }
-  .chart-wrap { overflow-x: auto; padding-bottom: 6px; }
-  .chart-inner { display: flex; align-items: flex-end; gap: 4px; min-height: 130px; padding-top: 10px; }
+  .chart-row { display: flex; }
+  .chart-axis { position: relative; width: 44px; flex-shrink: 0; height: 100px; margin-top: 10px; }
+  .chart-axis-label { position: absolute; right: 6px; transform: translateY(50%); font-size: 9px; color: #a0aec0; white-space: nowrap; }
+  .chart-scroll { flex: 1; min-width: 0; overflow-x: auto; padding-bottom: 6px; }
+  .chart-plot { position: relative; }
+  .chart-gridlines { position: absolute; left: 0; right: 0; top: 10px; height: 100px; pointer-events: none; }
+  .chart-gridline { position: absolute; left: 0; right: 0; height: 1px; background: #eef1f4; }
+  .chart-inner { display: flex; align-items: flex-end; gap: 4px; min-height: 130px; padding-top: 10px; position: relative; }
   .bar-grp { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: 1; min-width: 26px; max-width: 50px; }
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 100px; }
   .bar { border-radius: 2px 2px 0 0; width: 11px; }
@@ -205,6 +211,7 @@ let currentAdsSpend = [];
 let currentDateFrom = '';
 let currentDateTo = '';
 let chartMetric = 'total';
+let chartGranularity = 'day';
 
 function parseCsv(text) {
   const rows = [];
@@ -800,22 +807,64 @@ const CHART_METRICS = {
   spend:       { label: 'Ad Spend' },
   roas:        { label: 'ROAS' }
 };
+const CHART_GRANULARITIES = { day: 'Daily', week: 'Weekly', month: 'Monthly' };
 
 function setChartMetric(v) { chartMetric = v; renderAnalysis(); }
+function setChartGranularity(v) { chartGranularity = v; renderAnalysis(); }
 
 function chartMetricSelectHtml() {
-  const opts = Object.keys(CHART_METRICS).map(k =>
+  const metricOpts = Object.keys(CHART_METRICS).map(k =>
     `<option value="${k}"${k===chartMetric?' selected':''}>${CHART_METRICS[k].label}</option>`).join('');
-  return `<select onchange="setChartMetric(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${opts}</select>`;
+  const granOpts = Object.keys(CHART_GRANULARITIES).map(k =>
+    `<option value="${k}"${k===chartGranularity?' selected':''}>${CHART_GRANULARITIES[k]}</option>`).join('');
+  return `<span style="display:flex;gap:6px">
+    <select onchange="setChartGranularity(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${granOpts}</select>
+    <select onchange="setChartMetric(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${metricOpts}</select>
+  </span>`;
 }
 
-function renderChart(leads, metric, adsRows) {
+// Groups a date into a day/week/month bucket. Weeks start Monday; the bucket
+// key is that Monday's date so bucket keys still sort correctly as strings.
+function bucketKey(dateStr, granularity) {
+  const d = parseDateOnly(dateStr.slice(0,10));
+  if (granularity === 'month') return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+  if (granularity === 'week') {
+    const day = d.getUTCDay();
+    d.setUTCDate(d.getUTCDate() + (day===0 ? -6 : 1-day));
+    return fmtDateOnly(d);
+  }
+  return dateStr.slice(0,10);
+}
+function bucketLabel(key, granularity) {
+  if (granularity === 'month') {
+    const [y,m] = key.split('-');
+    return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(m)-1] + ' ' + y.slice(2);
+  }
+  if (granularity === 'week') return 'Wk ' + key.slice(5);
+  return key.slice(5);
+}
+
+// Picks a "nice" round gridline step (1/2/5/10 x a power of ten) for an axis
+// topping out at maxVal, aiming for roughly targetSteps gridlines.
+function niceStep(maxVal, targetSteps) {
+  targetSteps = targetSteps || 4;
+  if (maxVal <= 0) return 1;
+  const rawStep = maxVal / targetSteps;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const residual = rawStep / magnitude;
+  if (residual > 5) return 10 * magnitude;
+  if (residual > 2) return 5 * magnitude;
+  if (residual > 1) return 2 * magnitude;
+  return magnitude;
+}
+
+function renderChart(leads, metric, adsRows, granularity) {
   const bd = {};
-  const ensureDay = d => bd[d] || (bd[d] = {total:0,quot:0,kw:0,sales:0,revenue:0,spend:0});
+  const ensureBucket = k => bd[k] || (bd[k] = {total:0,quot:0,kw:0,sales:0,revenue:0,spend:0});
   leads.forEach(l => {
     const d = (l.date_created||l.lead_date||'').slice(0,10);
     if (!d) return;
-    const b = ensureDay(d);
+    const b = ensureBucket(bucketKey(d, granularity));
     b.total++;
     if (l.quotable==='Yes') b.quot++;
     if (l.lead_keyword) b.kw++;
@@ -823,13 +872,13 @@ function renderChart(leads, metric, adsRows) {
   });
   (adsRows||[]).forEach(r => {
     if (!r.date) return;
-    ensureDay(r.date).spend += r.cost;
+    ensureBucket(bucketKey(r.date, granularity)).spend += r.cost;
   });
-  const dates = Object.keys(bd).sort();
+  const buckets = Object.keys(bd).sort();
   const label = CHART_METRICS[metric].label;
 
-  const valueFor = d => {
-    const b = bd[d];
+  const valueFor = k => {
+    const b = bd[k];
     if (metric==='quotableYes') return b.quot;
     if (metric==='bookingRate') return b.total ? Math.round(b.quot/b.total*100) : 0;
     if (metric==='sales')       return b.sales;
@@ -839,28 +888,49 @@ function renderChart(leads, metric, adsRows) {
     return b.total;
   };
   const fmtVal = v => (metric==='revenue'||metric==='spend') ? fmtCurrency(v) : metric==='bookingRate' ? v+'%' : metric==='roas' ? v.toFixed(2)+'x' : v;
+  const fmtAxisVal = v => {
+    if (metric==='revenue'||metric==='spend') return v>=1000 ? CURRENCY_SYMBOL+(v/1000)+'k' : CURRENCY_SYMBOL+v;
+    if (metric==='bookingRate') return v+'%';
+    if (metric==='roas') return v.toFixed(1)+'x';
+    return v>=1000 ? (v/1000)+'k' : String(v);
+  };
 
-  const maxV = Math.max(...dates.map(valueFor), 1);
-  const bars = dates.map(d => {
-    const b = bd[d];
-    const v = valueFor(d);
+  const rawMax = Math.max(...buckets.map(valueFor), 1);
+  const step = niceStep(rawMax);
+  const niceMax = Math.max(Math.ceil(rawMax/step)*step, step);
+  const gridlineCount = Math.round(niceMax/step);
+  const gridVals = Array.from({length: gridlineCount+1}, (_,i) => i*step);
+
+  const bars = buckets.map(k => {
+    const b = bd[k];
+    const v = valueFor(k);
     const kwP = b.total ? Math.round(b.kw/b.total*100) : 0;
     const secondBar = metric==='total'
-      ? `<div class="bar q" style="height:${Math.round((maxV?b.quot/maxV:0)*90)}px"></div>`
+      ? `<div class="bar q" style="height:${Math.round((niceMax?b.quot/niceMax:0)*90)}px"></div>`
       : '';
-    return `<div class="bar-grp" title="${d}: ${fmtVal(v)} ${label}, ${b.total} total leads, ${kwP}% keyword">
+    return `<div class="bar-grp" title="${bucketLabel(k,granularity)}: ${fmtVal(v)} ${label}, ${b.total} total leads, ${kwP}% keyword">
       <div class="bars">
-        <div class="bar t" style="height:${Math.round(v/maxV*90)}px"></div>
+        <div class="bar t" style="height:${Math.round(v/niceMax*90)}px"></div>
         ${secondBar}
       </div>
-      <div class="bar-lbl">${d.slice(5)}</div>
+      <div class="bar-lbl">${bucketLabel(k,granularity)}</div>
     </div>`;
   }).join('');
+
+  const axisHtml = gridVals.map(g => `<div class="chart-axis-label" style="bottom:${Math.round(g/niceMax*90)}px">${fmtAxisVal(g)}</div>`).join('');
+  const gridlineHtml = gridVals.map(g => `<div class="chart-gridline" style="bottom:${Math.round(g/niceMax*90)}px"></div>`).join('');
+
   return `<div class="legend">
     <div class="leg-item"><div class="leg-dot" style="background:#4c565c"></div>${label}</div>
     ${metric==='total' ? '<div class="leg-item"><div class="leg-dot" style="background:#aec90b"></div>Quotable Yes</div>' : ''}
   </div>
-  <div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`;
+  <div class="chart-row">
+    <div class="chart-axis">${axisHtml}</div>
+    <div class="chart-scroll"><div class="chart-plot">
+      <div class="chart-gridlines">${gridlineHtml}</div>
+      <div class="chart-inner">${bars}</div>
+    </div></div>
+  </div>`;
 }
 
 function getFilteredLeads() {
@@ -891,6 +961,12 @@ async function runAnalysis() {
     currentLeads = rawLeads.filter(l => l.quotable !== 'Not Set');
     currentDateFrom = dateFrom;
     currentDateTo   = dateTo;
+
+    // Default the chart to a granularity that won't dump hundreds of daily
+    // bars on a long range (e.g. YTD) — the dropdown still lets the user
+    // override this for the currently loaded data.
+    const rangeDays = Math.round((parseDateOnly(dateTo) - parseDateOnly(dateFrom)) / 86400000) + 1;
+    chartGranularity = rangeDays > 120 ? 'month' : rangeDays > 45 ? 'week' : 'day';
     populateFilterOptions(currentLeads);
     const excluded = rawLeads.length - currentLeads.length;
 
@@ -1054,7 +1130,7 @@ function renderAnalysis() {
         <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS (CPC Revenue / Spend)</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
       </div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr)}</div></div>
+    <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr, chartGranularity)}</div></div>
     <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source'})}</div></div>
     <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span></div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign'})}</div></div>
     <div class="two-col">
