@@ -613,6 +613,26 @@ function groupKeyword(kw) {
   return 'Other';
 }
 
+// Cookie-consent blocking wipes out lead_campaign/lead_content/lead_keyword
+// together but leaves lead_source/lead_medium/gclid intact (those come from
+// the URL, not a cookie) — so a google/cpc lead with no campaign or keyword
+// is still a real paid-search lead, just one WhatConverts couldn't attribute
+// in detail. Bucketing these instead of dropping them keeps the Campaign
+// Performance and keyword tables from silently losing real leads/revenue.
+const NOT_TRACKED_LABEL = 'Not Tracked (Google CPC)';
+function isUntrackedGoogleCpc(l) {
+  return (l.lead_source||'').toLowerCase().trim() === 'google' && (l.lead_medium||'').toLowerCase().trim() === 'cpc';
+}
+function campaignKey(l) {
+  return l.lead_campaign || (isUntrackedGoogleCpc(l) ? 'NOT_TRACKED_CPC' : null);
+}
+function themeKey(l) {
+  return l.lead_keyword ? groupKeyword(l.lead_keyword) : (isUntrackedGoogleCpc(l) ? NOT_TRACKED_LABEL : null);
+}
+function rawKeywordKey(l) {
+  return l.lead_keyword ? l.lead_keyword.toLowerCase().trim() : (isUntrackedGoogleCpc(l) ? '(not tracked — google cpc)' : null);
+}
+
 function countBy(leads, fn) {
   return leads.reduce((m,l) => { const k=fn(l); if(k!=null) m[k]=(m[k]||0)+1; return m; }, {});
 }
@@ -870,10 +890,11 @@ function renderAnalysis() {
   const campNameMap = {};
   currentAdsSpend.forEach(r => { campNameMap[r.campaignId] = r.campaignName; });
   const campSpendStats = groupAdsSpend(adsCurr, adsPrev, r => r.campaignId);
-  const campLeadStats = groupStats(curr, prev, l => l.lead_campaign);
+  const campLeadStats = groupStats(curr, prev, campaignKey);
   const campaignIds = new Set([...Object.keys(campSpendStats), ...Object.keys(campLeadStats)]);
   const campaignRows = [...campaignIds].filter(id=>id).map(id => {
-    const row = statsToRow('campaign', campNameMap[id] || id, campLeadStats[id] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0});
+    const label = campNameMap[id] || (id==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : id);
+    const row = statsToRow('campaign', label, campLeadStats[id] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0});
     row.campaignId = id;
     return applySpendToRow(row, campSpendStats[id]);
   }).sort((a,b)=>b.spendC-a.spendC);
@@ -883,14 +904,14 @@ function renderAnalysis() {
   // spend), so wasted-spend keywords surface via the Spend/ROAS columns
   // even if they never converted.
   const adsThemeStats = groupAdsSpend(adsCurr, adsPrev, r => groupKeyword(r.keywordText));
-  const kwThemeStats = groupStats(curr, prev, l=>groupKeyword(l.lead_keyword));
+  const kwThemeStats = groupStats(curr, prev, themeKey);
   const themeKeys = new Set([...Object.keys(kwThemeStats), ...Object.keys(adsThemeStats)]);
   const kwThemeRows = [...themeKeys].filter(k=>k)
     .map(k => applySpendToRow(statsToRow('theme', k, kwThemeStats[k] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0}), adsThemeStats[k]))
     .sort((a,b)=>b.curr-a.curr);
 
   const adsKwStats = groupAdsSpend(adsCurr, adsPrev, r => (r.keywordText||'').toLowerCase().trim());
-  const rawKwStats = groupStats(curr, prev, l=>l.lead_keyword?.toLowerCase().trim());
+  const rawKwStats = groupStats(curr, prev, rawKeywordKey);
   const rawKwKeys = new Set([...Object.keys(rawKwStats), ...Object.keys(adsKwStats)]);
   const rawKwRows = [...rawKwKeys].filter(k=>k&&k!=='undefined'&&k!=='null')
     .map(k => applySpendToRow(statsToRow('keyword', k, rawKwStats[k] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0}), adsKwStats[k]))
