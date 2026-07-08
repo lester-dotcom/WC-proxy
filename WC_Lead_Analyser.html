@@ -347,13 +347,25 @@ function csvFromTable(data) {
   return [data.headers, ...data.rows].map(r => r.map(csvEscape).join(',')).join('\n');
 }
 
-// A plain HTML <table> saved with a .xls extension and the Excel MIME type
-// opens directly in Excel with columns/formatting intact — no binary XLSX
-// writer or external library needed for a tool this size.
-function xlsHtmlFromTable(data, title) {
-  const theadHtml = `<tr>${data.headers.map(h=>`<th>${h}</th>`).join('')}</tr>`;
-  const tbodyHtml = data.rows.map(r => `<tr>${r.map(v=>`<td>${v??''}</td>`).join('')}</tr>`).join('');
-  return `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="UTF-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>${title}</x:Name></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head><body><table border="1">${theadHtml}${tbodyHtml}</table></body></html>`;
+function xmlEscape(v) {
+  return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// A real Excel XML Spreadsheet ("SpreadsheetML", the Excel 2003 XML format) —
+// unlike an HTML table saved with a .xls extension, Excel recognizes this
+// format directly and opens it with no "file format doesn't match the
+// extension" warning.
+function xlsFromTable(data, sheetName) {
+  const safeName = (sheetName||'Sheet1').replace(/[^A-Za-z0-9 _-]/g,'').slice(0,31) || 'Sheet1';
+  const rowXml = cells => `<Row>${cells.map(c=>`<Cell><Data ss:Type="String">${xmlEscape(c)}</Data></Cell>`).join('')}</Row>`;
+  const rowsXml = [data.headers, ...data.rows].map(rowXml).join('');
+  return `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="${safeName}">
+  <Table>${rowsXml}</Table>
+ </Worksheet>
+</Workbook>`;
 }
 
 function exportTable(tableId, format) {
@@ -361,7 +373,7 @@ function exportTable(tableId, format) {
   if (!data) return;
   const filename = `${tableId}-${currentDateFrom}-to-${currentDateTo}`;
   const isCsv = format === 'csv';
-  const blob = new Blob([isCsv ? csvFromTable(data) : xlsHtmlFromTable(data, tableId)], {type: isCsv ? 'text/csv' : 'application/vnd.ms-excel'});
+  const blob = new Blob([isCsv ? csvFromTable(data) : xlsFromTable(data, tableId)], {type: isCsv ? 'text/csv' : 'application/vnd.ms-excel'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename + (isCsv ? '.csv' : '.xls');
