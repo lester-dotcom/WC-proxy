@@ -140,14 +140,24 @@ let currentDateFrom = '';
 let currentDateTo = '';
 let chartMetric = 'total';
 
-// Populated on each render so the Keyword Themes / Raw Keywords / Traffic
-// Source drill-down links can look up which leads belong to the clicked row,
-// and so the summary download reflects exactly what's on screen.
+// Populated on each render so the drill-down links can look up which leads
+// belong to the clicked row, and so the summary download reflects exactly
+// what's on screen.
 let lastRenderedLeads = [];
-let lastKwThemeRows = [];
-let lastRawKwRows = [];
-let lastSourceRows = [];
 let lastSummaryData = null;
+
+// Per-table sort state, keyed by the tableId passed to tbl(). Persists across
+// re-renders (filter changes, chart metric switches) within the session.
+let tableSortState = {};
+function sortTable(tableId, colKey) {
+  const state = tableSortState[tableId];
+  if (state && state.colKey === colKey) {
+    state.dir = state.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    tableSortState[tableId] = { colKey, dir: 'desc' };
+  }
+  renderAnalysis();
+}
 
 function csvEscape(v) {
   const s = String(v??'');
@@ -207,24 +217,26 @@ function openLeadsWindow(matchingLeads, title) {
   }
 }
 
-function showThemeLeads(idx) {
-  const theme = lastKwThemeRows[idx].theme;
-  openLeadsWindow(lastRenderedLeads.filter(l => groupKeyword(l.lead_keyword) === theme), theme);
+// Row identity is passed as an encoded value rather than an array index,
+// since sortable headers reorder rows and an index would point at the
+// wrong row after sorting.
+function showThemeLeads(encodedKey, encodedLabel) {
+  const theme = decodeURIComponent(encodedKey);
+  openLeadsWindow(lastRenderedLeads.filter(l => groupKeyword(l.lead_keyword) === theme), decodeURIComponent(encodedLabel));
 }
 
-function showKeywordLeads(idx) {
-  const keyword = lastRawKwRows[idx].keyword;
-  openLeadsWindow(lastRenderedLeads.filter(l => (l.lead_keyword||'').toLowerCase().trim() === keyword), keyword);
+function showKeywordLeads(encodedKey, encodedLabel) {
+  const keyword = decodeURIComponent(encodedKey);
+  openLeadsWindow(lastRenderedLeads.filter(l => (l.lead_keyword||'').toLowerCase().trim() === keyword), decodeURIComponent(encodedLabel));
 }
 
-function showSourceLeads(idx) {
-  const row = lastSourceRows[idx];
-  const [sLower,mLower] = row.rawKey.split('|');
+function showSourceLeads(encodedKey, encodedLabel) {
+  const [sLower,mLower] = decodeURIComponent(encodedKey).split('|');
   const matched = lastRenderedLeads.filter(l =>
     (l.lead_source||'(not set)').toLowerCase().trim() === sLower &&
     (l.lead_medium||'(not set)').toLowerCase().trim() === mLower
   );
-  openLeadsWindow(matched, row.source);
+  openLeadsWindow(matched, decodeURIComponent(encodedLabel));
 }
 
 function trendClause(curr, prior, fmt) {
@@ -467,8 +479,27 @@ function changePill(d, currency) {
 function tbl(rows, cols, opts) {
   opts = opts || {};
   const clsFor = c => (c.pct||c.change) ? 'ctr' : c.num ? 'num' : '';
-  const ths = cols.map(c=>`<th class="${clsFor(c)}">${c.label}</th>`).join('');
-  const trs = rows.map((r,idx) => {
+
+  const sortState = opts.tableId ? tableSortState[opts.tableId] : null;
+  let displayRows = rows;
+  if (sortState) {
+    const col = cols.find(c => c.key === sortState.colKey);
+    const numeric = col && (col.num || col.pct || col.change);
+    displayRows = rows.slice().sort((a,b) => {
+      const av = a[sortState.colKey], bv = b[sortState.colKey];
+      const cmp = numeric ? (Number(av)-Number(bv)) : String(av??'').localeCompare(String(bv??''));
+      return sortState.dir === 'asc' ? cmp : -cmp;
+    });
+  }
+
+  const ths = cols.map(c => {
+    if (!opts.tableId) return `<th class="${clsFor(c)}">${c.label}</th>`;
+    const isSorted = sortState && sortState.colKey === c.key;
+    const arrow = isSorted ? (sortState.dir === 'desc' ? ' ▼' : ' ▲') : '';
+    return `<th class="${clsFor(c)}" onclick="sortTable('${opts.tableId}','${c.key}')" style="cursor:pointer;user-select:none">${c.label}${arrow}</th>`;
+  }).join('');
+
+  const trs = displayRows.map(r => {
     const tds = cols.map((c,ci) => {
       const v = r[c.key];
       let content;
@@ -477,7 +508,8 @@ function tbl(rows, cols, opts) {
       else if (c.num)    content = c.currency ? fmtCurrency(v) : v;
       else content = v??'';
       if (ci===0 && opts.rowClick) {
-        content = `<a href="javascript:void(0)" onclick="${opts.rowClick}(${idx})" style="color:#1a4c7b;text-decoration:underline;cursor:pointer">${content}</a>`;
+        const keyVal = opts.rowKeyFn ? opts.rowKeyFn(r) : v;
+        content = `<a href="javascript:void(0)" onclick="${opts.rowClick}('${encodeURIComponent(keyVal)}','${encodeURIComponent(v)}')" style="color:#1a4c7b;text-decoration:underline;cursor:pointer">${content}</a>`;
       }
       return `<td class="${clsFor(c)}">${content}</td>`;
     }).join('');
@@ -659,9 +691,6 @@ function renderAnalysis() {
     .sort((a,b)=>b.curr-a.curr).slice(0,30);
 
   lastRenderedLeads = leads;
-  lastKwThemeRows = kwThemeRows;
-  lastRawKwRows = rawKwRows;
-  lastSourceRows = sourceRows;
 
   const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
   const formRows=Object.keys({...fC,...fP}).filter(k=>k&&k!=='undefined').map(k=>{
@@ -704,15 +733,15 @@ function renderAnalysis() {
       </div></div>
     </div>
     <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric)}</div></div>
-    <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source'})}</div></div>
     <div class="two-col">
-      <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}])}</div></div>
-      <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}])}</div></div>
+      <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
+      <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showThemeLeads'})}</div></div>
-    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30)</span><span class="note">Click a keyword to view its leads</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showKeywordLeads'})}</div></div>
-    <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}])}</div></div>
-    <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}])}</div></div>
+    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showThemeLeads', tableId:'kwTheme'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30)</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showKeywordLeads', tableId:'rawKw'})}</div></div>
+    <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
+    <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}], {tableId:'kwByDate'})}</div></div>
   `;
 }
 </script>
