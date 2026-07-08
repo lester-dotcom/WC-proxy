@@ -65,6 +65,7 @@
   .chart-plot { position: relative; }
   .chart-gridlines { position: absolute; left: 0; right: 0; top: 10px; height: 100px; pointer-events: none; }
   .chart-gridline { position: absolute; left: 0; right: 0; height: 1px; background: #eef1f4; }
+  .chart-avg-line { position: absolute; left: 0; right: 0; height: 0; border-top: 2px dashed #e53e3e; opacity: 0.7; }
   .chart-inner { display: flex; align-items: flex-end; gap: 4px; min-height: 130px; padding-top: 10px; position: relative; }
   .bar-grp { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: 1; min-width: 26px; max-width: 50px; }
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 100px; }
@@ -895,11 +896,13 @@ function renderChart(leads, metric, adsRows, granularity) {
     return v>=1000 ? (v/1000)+'k' : String(v);
   };
 
-  const rawMax = Math.max(...buckets.map(valueFor), 1);
+  const avgVal = buckets.length ? buckets.reduce((s,k)=>s+valueFor(k),0)/buckets.length : 0;
+  const rawMax = Math.max(...buckets.map(valueFor), avgVal, 1);
   const step = niceStep(rawMax);
   const niceMax = Math.max(Math.ceil(rawMax/step)*step, step);
   const gridlineCount = Math.round(niceMax/step);
   const gridVals = Array.from({length: gridlineCount+1}, (_,i) => i*step);
+  const avgPx = Math.round(avgVal/niceMax*90);
 
   const bars = buckets.map(k => {
     const b = bd[k];
@@ -919,15 +922,17 @@ function renderChart(leads, metric, adsRows, granularity) {
 
   const axisHtml = gridVals.map(g => `<div class="chart-axis-label" style="bottom:${Math.round(g/niceMax*90)}px">${fmtAxisVal(g)}</div>`).join('');
   const gridlineHtml = gridVals.map(g => `<div class="chart-gridline" style="bottom:${Math.round(g/niceMax*90)}px"></div>`).join('');
+  const avgLineHtml = `<div class="chart-avg-line" style="bottom:${avgPx}px" title="Average ${label}: ${fmtVal(avgVal)}"></div>`;
 
   return `<div class="legend">
     <div class="leg-item"><div class="leg-dot" style="background:#4c565c"></div>${label}</div>
     ${metric==='total' ? '<div class="leg-item"><div class="leg-dot" style="background:#aec90b"></div>Quotable Yes</div>' : ''}
+    <div class="leg-item"><div class="leg-dot" style="background:#e53e3e"></div>Average (${fmtVal(avgVal)})</div>
   </div>
   <div class="chart-row">
     <div class="chart-axis">${axisHtml}</div>
     <div class="chart-scroll"><div class="chart-plot">
-      <div class="chart-gridlines">${gridlineHtml}</div>
+      <div class="chart-gridlines">${gridlineHtml}${avgLineHtml}</div>
       <div class="chart-inner">${bars}</div>
     </div></div>
   </div>`;
@@ -996,6 +1001,14 @@ function renderAnalysis() {
   const {prev,curr} = splitPeriods(leads, dateFrom, dateTo);
   const { priorFrom, priorTo } = priorPeriodBounds(dateFrom, dateTo);
   const dropDate = detectDrop(curr);
+
+  // Sales get recorded a median of ~19 days after the lead date (booking,
+  // treatment, then invoicing all take time) — so revenue for any period
+  // ending within the last few weeks is a lower bound, not final. Warn
+  // whenever the selected range could still be affected.
+  const REVENUE_LAG_DAYS = 21;
+  const daysSinceRangeEnd = Math.round((parseDateOnly(fmtLocalDate(new Date())) - parseDateOnly(dateTo)) / 86400000);
+  const revenueLagWarning = daysSinceRangeEnd < REVENUE_LAG_DAYS;
 
   const tc=curr.length, tp=prev.length;
   const qc=curr.filter(l=>l.quotable==='Yes').length, qp=prev.filter(l=>l.quotable==='Yes').length;
@@ -1111,6 +1124,7 @@ function renderAnalysis() {
 
   document.getElementById('main').innerHTML = `
     ${dropDate?`<div class="drop-alert">Keyword tracking drop detected: coverage fell below 50% from <strong>${dropDate}</strong>. Check the WhatConverts script and cookie consent settings around that date.</div>`:''}
+    ${revenueLagWarning?`<div class="drop-alert">Revenue for this period is likely incomplete: sales are recorded a median of <strong>19 days</strong> after the lead date, and your selected range ends only ${daysSinceRangeEnd} day${daysSinceRangeEnd===1?'':'s'} ago. Revenue, Sales, and ROAS figures here will keep rising as more sales get logged over the next few weeks — treat them as a lower bound, not final.</div>`:''}
     <div class="section">
       <div class="section-hd">
         <span>Overview</span>
@@ -1128,7 +1142,9 @@ function renderAnalysis() {
         <div class="kpi"><div class="kpi-val">${fmtCurrency(cpcRevC)}</div><div class="kpi-label">CPC Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(cpcRevP)}</div></div>
         <div class="kpi"><div class="kpi-val">${fmtCurrency(spendC)}</div><div class="kpi-label">Ad Spend (Google Ads)</div><div class="kpi-sub">prior: ${fmtCurrency(spendP)}</div></div>
         <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS (CPC Revenue / Spend)</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
-      </div></div>
+      </div>
+      <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:10px">Note: sales are typically recorded a median of 19 days after the lead date, so revenue/sales figures for the last 2–3 weeks are usually incomplete and will rise as more sales get logged.</div>
+      </div>
     </div>
     <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr, chartGranularity)}</div></div>
     <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source'})}</div></div>
