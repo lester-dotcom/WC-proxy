@@ -314,6 +314,14 @@ let lastSummaryData = null;
 // Per-table sort state, keyed by the tableId passed to tbl(). Persists across
 // re-renders (filter changes, chart metric switches) within the session.
 let tableSortState = {};
+// Per-table current page (0-indexed), for tables rendered with opts.paginate.
+let tablePageState = {};
+// The full (sorted, unpaginated) row data behind each tableId, refreshed on
+// every render — export always pulls from here so it includes every row,
+// not just whichever page is currently visible.
+let tableExportData = {};
+const TABLE_PAGE_SIZE = 10;
+
 function sortTable(tableId, colKey) {
   const state = tableSortState[tableId];
   if (state && state.colKey === colKey) {
@@ -321,7 +329,45 @@ function sortTable(tableId, colKey) {
   } else {
     tableSortState[tableId] = { colKey, dir: 'desc' };
   }
+  tablePageState[tableId] = 0;
   renderAnalysis();
+}
+
+function setTablePage(tableId, page) {
+  tablePageState[tableId] = page;
+  renderAnalysis();
+}
+
+function exportButtonsHtml(tableId) {
+  const btn = (fmt,label) => `<button onclick="exportTable('${tableId}','${fmt}')" style="border:none;border-radius:4px;padding:3px 9px;font-size:10px;font-weight:600;cursor:pointer;background:rgba(255,255,255,0.15);color:#fff">${label}</button>`;
+  return `<span style="display:flex;gap:4px">${btn('csv','CSV')}${btn('xls','XLS')}</span>`;
+}
+
+function csvFromTable(data) {
+  return [data.headers, ...data.rows].map(r => r.map(csvEscape).join(',')).join('\n');
+}
+
+// A plain HTML <table> saved with a .xls extension and the Excel MIME type
+// opens directly in Excel with columns/formatting intact — no binary XLSX
+// writer or external library needed for a tool this size.
+function xlsHtmlFromTable(data, title) {
+  const theadHtml = `<tr>${data.headers.map(h=>`<th>${h}</th>`).join('')}</tr>`;
+  const tbodyHtml = data.rows.map(r => `<tr>${r.map(v=>`<td>${v??''}</td>`).join('')}</tr>`).join('');
+  return `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="UTF-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>${title}</x:Name></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head><body><table border="1">${theadHtml}${tbodyHtml}</table></body></html>`;
+}
+
+function exportTable(tableId, format) {
+  const data = tableExportData[tableId];
+  if (!data) return;
+  const filename = `${tableId}-${currentDateFrom}-to-${currentDateTo}`;
+  const isCsv = format === 'csv';
+  const blob = new Blob([isCsv ? csvFromTable(data) : xlsHtmlFromTable(data, tableId)], {type: isCsv ? 'text/csv' : 'application/vnd.ms-excel'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename + (isCsv ? '.csv' : '.xls');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function csvEscape(v) {
@@ -729,6 +775,18 @@ function roasPill(v) {
 }
 const sortNum = v => v==null || Number.isNaN(Number(v)) ? -Infinity : Number(v);
 
+function cellExportValue(c, v) {
+  if (c.roas) return v==null ? '' : v.toFixed(2)+'x';
+  if (c.pct) return (v??0)+'%';
+  if (c.change) {
+    const n = Number(v);
+    const sign = n>0 ? '+' : n<0 ? '-' : '';
+    return sign + (c.currency ? fmtCurrency(Math.abs(n)) : Math.abs(n));
+  }
+  if (c.currency) return fmtCurrency(v);
+  return v ?? '';
+}
+
 function tbl(rows, cols, opts) {
   opts = opts || {};
   const clsFor = c => (c.pct||c.change||c.roas) ? 'ctr' : c.num ? 'num' : '';
@@ -745,6 +803,32 @@ function tbl(rows, cols, opts) {
     });
   }
 
+  // Export always pulls the full sorted set, independent of pagination below.
+  if (opts.tableId) {
+    tableExportData[opts.tableId] = {
+      headers: cols.map(c=>c.label),
+      rows: displayRows.map(r => cols.map(c => cellExportValue(c, r[c.key])))
+    };
+  }
+
+  let pageRows = displayRows;
+  let paginationHtml = '';
+  if (opts.paginate && opts.tableId) {
+    const totalPages = Math.max(1, Math.ceil(displayRows.length / TABLE_PAGE_SIZE));
+    let page = tablePageState[opts.tableId] || 0;
+    if (page >= totalPages) page = totalPages - 1;
+    if (page < 0) page = 0;
+    tablePageState[opts.tableId] = page;
+    pageRows = displayRows.slice(page*TABLE_PAGE_SIZE, page*TABLE_PAGE_SIZE + TABLE_PAGE_SIZE);
+    if (totalPages > 1) {
+      paginationHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:10px;font-size:11px;color:#718096">
+        <button onclick="setTablePage('${opts.tableId}',${page-1})" ${page===0?'disabled':''} style="border:1px solid #e2e8f0;background:#fff;border-radius:4px;padding:4px 10px;cursor:pointer;color:#4c565c">‹ Prev</button>
+        <span>Page ${page+1} of ${totalPages} (${displayRows.length} rows)</span>
+        <button onclick="setTablePage('${opts.tableId}',${page+1})" ${page>=totalPages-1?'disabled':''} style="border:1px solid #e2e8f0;background:#fff;border-radius:4px;padding:4px 10px;cursor:pointer;color:#4c565c">Next ›</button>
+      </div>`;
+    }
+  }
+
   const ths = cols.map(c => {
     if (!opts.tableId) return `<th class="${clsFor(c)}">${c.label}</th>`;
     const isSorted = sortState && sortState.colKey === c.key;
@@ -752,7 +836,7 @@ function tbl(rows, cols, opts) {
     return `<th class="${clsFor(c)}" onclick="sortTable('${opts.tableId}','${c.key}')" style="cursor:pointer;user-select:none">${c.label}${arrow}</th>`;
   }).join('');
 
-  const trs = displayRows.map(r => {
+  const trs = pageRows.map(r => {
     const tds = cols.map((c,ci) => {
       const v = r[c.key];
       let content;
@@ -769,7 +853,7 @@ function tbl(rows, cols, opts) {
     }).join('');
     return `<tr>${tds}</tr>`;
   }).join('');
-  return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>${paginationHtml}`;
 }
 
 // currentLeads spans [priorFrom, dateTo] (see runAnalysis), so the boundary
@@ -1085,7 +1169,7 @@ function renderAnalysis() {
   const rawKwKeys = new Set([...Object.keys(rawKwStats), ...Object.keys(adsKwStats)]);
   const rawKwRows = [...rawKwKeys].filter(k=>k&&k!=='undefined'&&k!=='null')
     .map(k => applySpendToRow(statsToRow('keyword', k, rawKwStats[k] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0}), adsKwStats[k]))
-    .sort((a,b)=>b.curr-a.curr).slice(0,30);
+    .sort((a,b)=>b.curr-a.curr);
 
   // Drill-down and the day-by-day views should only reflect leads within the
   // selected range, not the extended fetch (which also covers the prior
@@ -1147,16 +1231,16 @@ function renderAnalysis() {
       </div>
     </div>
     <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr, chartGranularity)}</div></div>
-    <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source'})}</div></div>
-    <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span></div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('source')}</div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source', paginate:true})}</div></div>
+    <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span>${exportButtonsHtml('campaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign', paginate:true})}</div></div>
     <div class="two-col">
-      <div class="section"><div class="section-hd">Quotable Breakdown</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
-      <div class="section"><div class="section-hd">Lead Type</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
+      <div class="section"><div class="section-hd"><span>Quotable Breakdown</span>${exportButtonsHtml('quotable')}</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
+      <div class="section"><div class="section-hd"><span>Lead Type</span>${exportButtonsHtml('leadType')}</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme'})}</div></div>
-    <div class="section"><div class="section-hd"><span>Raw Keywords (top 30 by lead count)</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showKeywordLeads', tableId:'rawKw'})}</div></div>
-    <div class="section"><div class="section-hd">Form Names</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
-    <div class="section"><div class="section-hd">Keyword Coverage by Date</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}], {tableId:'kwByDate'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span>${exportButtonsHtml('kwTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme', paginate:true})}</div></div>
+    <div class="section"><div class="section-hd"><span>Raw Keywords</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span>${exportButtonsHtml('rawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showKeywordLeads', tableId:'rawKw', paginate:true})}</div></div>
+    <div class="section"><div class="section-hd"><span>Form Names</span>${exportButtonsHtml('formNames')}</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
+    <div class="section"><div class="section-hd"><span>Keyword Coverage by Date</span>${exportButtonsHtml('kwByDate')}</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}], {tableId:'kwByDate'})}</div></div>
   `;
 }
 </script>
