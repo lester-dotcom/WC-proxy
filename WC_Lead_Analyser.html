@@ -95,11 +95,23 @@
     </div>
     <div class="field">
       <label>Date From</label>
-      <input type="date" id="dateFrom" style="width:145px">
+      <input type="date" id="dateFrom" onchange="document.getElementById('quickRange').value=''" style="width:145px">
     </div>
     <div class="field">
       <label>Date To</label>
-      <input type="date" id="dateTo" style="width:145px">
+      <input type="date" id="dateTo" onchange="document.getElementById('quickRange').value=''" style="width:145px">
+    </div>
+    <div class="field">
+      <label>Quick Range</label>
+      <select id="quickRange" onchange="applyQuickRange(this.value)" style="width:150px">
+        <option value="">Custom</option>
+        <option value="last7">Last 7 Days</option>
+        <option value="last30">Last 30 Days</option>
+        <option value="thisMonth">This Month</option>
+        <option value="lastMonth">Last Month</option>
+        <option value="last3months">Last 3 Months</option>
+        <option value="ytd">Year to Date</option>
+      </select>
     </div>
     <div style="display:flex;gap:8px;align-items:flex-end">
       <button class="btn btn-slate" onclick="loadProfiles()">Load Profiles</button>
@@ -130,14 +142,63 @@
 </div>
 
 <script>
+// For "today-relative" ranges (quick presets, the initial default range):
+// construct AND format using local getters/setters throughout. Mixing
+// local construction with toISOString() (UTC-based) shifts the date back
+// a day whenever the browser's timezone is ahead of UTC (e.g. BST) —
+// that bug made "This Month"/"Last Month" open a day early.
+function fmtLocalDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 const today = new Date();
 const d42 = new Date(); d42.setDate(today.getDate() - 42);
-document.getElementById('dateTo').value   = today.toISOString().slice(0,10);
-document.getElementById('dateFrom').value = d42.toISOString().slice(0,10);
+document.getElementById('dateTo').value   = fmtLocalDate(today);
+document.getElementById('dateFrom').value = fmtLocalDate(d42);
 
 // The proxy URL is pre-filled and this account has a single profile,
 // so load it automatically instead of waiting for a manual click.
 if (proxyBase()) { loadProfiles(); }
+
+function applyQuickRange(preset) {
+  if (!preset) return;
+  const today = new Date();
+  let from, to = new Date(today);
+  if (preset==='last7') { from = new Date(today); from.setDate(from.getDate()-6); }
+  else if (preset==='last30') { from = new Date(today); from.setDate(from.getDate()-29); }
+  else if (preset==='thisMonth') { from = new Date(today.getFullYear(), today.getMonth(), 1); }
+  else if (preset==='lastMonth') { from = new Date(today.getFullYear(), today.getMonth()-1, 1); to = new Date(today.getFullYear(), today.getMonth(), 0); }
+  else if (preset==='last3months') { from = new Date(today); from.setMonth(from.getMonth()-3); from.setDate(from.getDate()+1); }
+  else if (preset==='ytd') { from = new Date(today.getFullYear(), 0, 1); }
+  document.getElementById('dateFrom').value = fmtLocalDate(from);
+  document.getElementById('dateTo').value = fmtLocalDate(to);
+  if (document.getElementById('profileSel').value) runAnalysis();
+}
+
+// dateFrom/dateTo here are plain "YYYY-MM-DD" strings from date <input>s, not
+// tied to any particular moment — so this parses/formats in a fixed UTC frame
+// throughout (Date.UTC + getUTC*/setUTC*), deliberately never touching local
+// time or toISOString(), so it's correct regardless of the browser's timezone
+// (unlike the local/UTC mixing bug fixed above in fmtLocalDate's callers).
+function parseDateOnly(s) {
+  const [y,m,d] = s.split('-').map(Number);
+  return new Date(Date.UTC(y, m-1, d));
+}
+function fmtDateOnly(d) {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+
+// The immediately-preceding period of equal length to [dateFrom, dateTo],
+// used as the actual "prior" comparison window — NOT half of the selected
+// range. (Splitting the selected range in half was the old, wrong model:
+// selecting "April" only showed half of April's totals as "recent".)
+function priorPeriodBounds(dateFrom, dateTo) {
+  const from = parseDateOnly(dateFrom), to = parseDateOnly(dateTo);
+  const rangeDays = Math.round((to - from) / 86400000) + 1;
+  const priorTo = new Date(from); priorTo.setUTCDate(priorTo.getUTCDate() - 1);
+  const priorFrom = new Date(priorTo); priorFrom.setUTCDate(priorFrom.getUTCDate() - (rangeDays - 1));
+  return { priorFrom: fmtDateOnly(priorFrom), priorTo: fmtDateOnly(priorTo) };
+}
 
 let currentLeads = [];
 let currentAdsSpend = [];
@@ -199,16 +260,14 @@ async function fetchAdsSpend(url) {
 }
 
 function splitAdsPeriods(adsRows, dateFrom, dateTo) {
+  const { priorFrom, priorTo } = priorPeriodBounds(dateFrom, dateTo);
   const from = new Date(dateFrom).getTime();
   const to = new Date(dateTo).getTime() + 86399999; // include the full end day
-  const mid = (new Date(dateFrom).getTime() + new Date(dateTo).getTime()) / 2;
-  const inRange = adsRows.filter(r => {
-    const t = new Date(r.date).getTime();
-    return t >= from && t <= to;
-  });
+  const pFrom = new Date(priorFrom).getTime();
+  const pTo = new Date(priorTo).getTime() + 86399999;
   return {
-    prev: inRange.filter(r => new Date(r.date).getTime() <= mid),
-    curr: inRange.filter(r => new Date(r.date).getTime() > mid)
+    curr: adsRows.filter(r => { const t = new Date(r.date).getTime(); return t >= from && t <= to; }),
+    prev: adsRows.filter(r => { const t = new Date(r.date).getTime(); return t >= pFrom && t <= pTo; })
   };
 }
 
@@ -430,7 +489,7 @@ function downloadSummary() {
     strong{color:#4c565c}
   </style></head><body>
     <h1>Lead Performance Summary</h1>
-    <div class="sub">Period: ${d.midDate} to ${d.dateTo} (compared to ${d.dateFrom} to ${d.midDate}) &bull; ${filterDesc}</div>
+    <div class="sub">Period: ${d.dateFrom} to ${d.dateTo} (compared to ${d.priorFrom} to ${d.priorTo}) &bull; ${filterDesc}</div>
     <button class="btn" id="dl">Download this summary</button>
     <ul>
       <li>You received <strong>${d.tc} leads</strong> in this period, ${trendClause(d.tc, d.tp)}.</li>
@@ -705,11 +764,13 @@ function tbl(rows, cols, opts) {
   return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
 }
 
+// currentLeads spans [priorFrom, dateTo] (see runAnalysis), so the boundary
+// between prior and current is simply dateFrom itself — no midpoint needed.
 function splitPeriods(leads, dateFrom, dateTo) {
-  const mid = (new Date(dateFrom).getTime() + new Date(dateTo).getTime()) / 2;
+  const from = new Date(dateFrom).getTime();
   return {
-    prev: leads.filter(l => new Date(l.date_created||l.lead_date) <= mid),
-    curr: leads.filter(l => new Date(l.date_created||l.lead_date) > mid)
+    prev: leads.filter(l => new Date(l.date_created||l.lead_date).getTime() < from),
+    curr: leads.filter(l => new Date(l.date_created||l.lead_date).getTime() >= from)
   };
 }
 
@@ -821,7 +882,12 @@ async function runAnalysis() {
   setStatus('Fetching leads...','loading');
 
   try {
-    const rawLeads = await fetchAllLeads(profileId, dateFrom, dateTo);
+    // Fetch from the start of the prior comparison period through dateTo in
+    // one go, so "prior" is an actual equal-length preceding period rather
+    // than the selected range split in half (which silently halved every
+    // total shown for the range the user actually asked to see).
+    const { priorFrom } = priorPeriodBounds(dateFrom, dateTo);
+    const rawLeads = await fetchAllLeads(profileId, priorFrom, dateTo);
     currentLeads = rawLeads.filter(l => l.quotable !== 'Not Set');
     currentDateFrom = dateFrom;
     currentDateTo   = dateTo;
@@ -852,8 +918,8 @@ function renderAnalysis() {
   const dateFrom = currentDateFrom, dateTo = currentDateTo;
 
   const {prev,curr} = splitPeriods(leads, dateFrom, dateTo);
-  const midDate = new Date((new Date(dateFrom).getTime()+new Date(dateTo).getTime())/2).toISOString().slice(0,10);
-  const dropDate = detectDrop(leads);
+  const { priorFrom, priorTo } = priorPeriodBounds(dateFrom, dateTo);
+  const dropDate = detectDrop(curr);
 
   const tc=curr.length, tp=prev.length;
   const qc=curr.filter(l=>l.quotable==='Yes').length, qp=prev.filter(l=>l.quotable==='Yes').length;
@@ -932,7 +998,10 @@ function renderAnalysis() {
     .map(k => applySpendToRow(statsToRow('keyword', k, rawKwStats[k] || {curr:0,prev:0,qCurr:0,qPrev:0,sCurr:0,sPrev:0,rCurr:0,rPrev:0}), adsKwStats[k]))
     .sort((a,b)=>b.curr-a.curr).slice(0,30);
 
-  lastRenderedLeads = leads;
+  // Drill-down and the day-by-day views should only reflect leads within the
+  // selected range, not the extended fetch (which also covers the prior
+  // comparison period).
+  lastRenderedLeads = curr;
 
   const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
   const formRows=Object.keys({...fC,...fP}).filter(k=>k&&k!=='undefined').map(k=>{
@@ -943,7 +1012,7 @@ function renderAnalysis() {
   }).sort((a,b)=>b.curr-a.curr);
 
   const bd={};
-  leads.forEach(l=>{
+  curr.forEach(l=>{
     const d=(l.date_created||l.lead_date||'').slice(0,10); if(!d) return;
     if(!bd[d]) bd[d]={total:0,kw:0,quot:0};
     bd[d].total++; if(l.lead_keyword) bd[d].kw++; if(l.quotable==='Yes') bd[d].quot++;
@@ -954,7 +1023,7 @@ function renderAnalysis() {
     quot:bd[d].quot,qPct:bd[d].total?Math.round(bd[d].quot/bd[d].total*100):0
   }));
 
-  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, midDate, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, cpcRevC, cpcRevP, spendC, spendP, roasC, roasP, kwThemeRows, sourceRows, campaignRows };
+  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, priorFrom, priorTo, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, cpcRevC, cpcRevP, spendC, spendP, roasC, roasP, kwThemeRows, sourceRows, campaignRows };
 
   const SPEND_ROAS_COLS = [
     {label:'Spend',key:'spendC',num:true,currency:true},
@@ -969,7 +1038,7 @@ function renderAnalysis() {
     <div class="section">
       <div class="section-hd">
         <span>Overview</span>
-        <span class="note">Recent: ${midDate} to ${dateTo} / Prior: ${dateFrom} to ${midDate}</span>
+        <span class="note">Recent: ${dateFrom} to ${dateTo} / Prior: ${priorFrom} to ${priorTo}</span>
         <button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadSummary()">Download Summary</button>
       </div>
       <div class="section-bd"><div class="kpi-grid">
@@ -985,7 +1054,7 @@ function renderAnalysis() {
         <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS (CPC Revenue / Spend)</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
       </div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(leads, chartMetric, [...adsCurr, ...adsPrev])}</div></div>
+    <div class="section"><div class="section-hd"><span>Daily Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr)}</div></div>
     <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span></div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source'})}</div></div>
     <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span></div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign'})}</div></div>
     <div class="two-col">
