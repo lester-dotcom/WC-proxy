@@ -78,6 +78,11 @@
   .leg-dot { width: 10px; height: 10px; border-radius: 2px; }
   .proxy-note { background: #fffbeb; border: 1px solid #f6e05e; border-radius: 6px; padding: 10px 14px; font-size: 11px; color: #744210; margin-bottom: 4px; }
   .empty { text-align: center; padding: 60px 20px; color: #a0aec0; }
+  .tab-bar { display: flex; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+  .tab-btn { border: 1px solid #e2e8f0; background: #fff; color: #4c565c; border-radius: 6px 6px 0 0; padding: 9px 18px; font-size: 12px; font-weight: 600; cursor: pointer; border-bottom: none; }
+  .tab-btn:hover { background: #f8fafc; }
+  .tab-btn.active { background: #4c565c; color: #fff; }
+  .tab-panel { display: flex; flex-direction: column; gap: 18px; }
 </style>
 </head>
 <body>
@@ -321,6 +326,10 @@ let tablePageState = {};
 // not just whichever page is currently visible.
 let tableExportData = {};
 const TABLE_PAGE_SIZE = 10;
+// Which top-level tab is showing. Persists across re-renders (sorting,
+// pagination, filter changes) the same way tableSortState/tablePageState do.
+let activeMainTab = 1;
+function setMainTab(n) { activeMainTab = n; renderAnalysis(); }
 
 function sortTable(tableId, colKey) {
   const state = tableSortState[tableId];
@@ -1204,42 +1213,60 @@ function renderAnalysis() {
   // Landing Pages: grouped by the page a visitor's session started on.
   // "Lands" counts every lead recorded against that page, including
   // WhatConverts-flagged duplicates (the page really was landed on either
-  // way); Leads/Booked/Sales/Revenue exclude duplicates so revenue isn't
-  // double-counted for repeat submissions from the same enquiry.
+  // way); Booked/Sales/Revenue exclude duplicates so revenue isn't
+  // double-counted for repeat submissions from the same enquiry. There's no
+  // separate "Leads" count here — with duplicates this rare it was always
+  // equal to Lands, so Booking Rate/Sales % (both measured against Lands)
+  // carry that signal instead.
   const landingStats = {};
   curr.forEach(l => {
     const p = pagePath(l.landing_url);
     if (!p) return;
-    if (!landingStats[p]) landingStats[p] = {lands:0,leads:0,booked:0,sales:0,revenue:0};
+    if (!landingStats[p]) landingStats[p] = {lands:0,booked:0,sales:0,revenue:0};
     const s = landingStats[p];
     s.lands++;
     if (!l.duplicate) {
-      s.leads++;
       if (l.quotable==='Yes') s.booked++;
       if (hasSalesValue(l)) { s.sales++; s.revenue += Number(l.sales_value); }
     }
   });
   const landingRows = Object.keys(landingStats).map(p => {
     const s = landingStats[p];
-    return { page:p, lands:s.lands, leads:s.leads, booked:s.booked, sales:s.sales, revenue:s.revenue, revPerLand: s.lands ? s.revenue/s.lands : 0 };
+    return {
+      page:p, lands:s.lands, booked:s.booked,
+      bookingRate: s.lands ? Math.round(s.booked/s.lands*100) : 0,
+      sales:s.sales, salesPct: s.lands ? Math.round(s.sales/s.lands*100) : 0,
+      revenue:s.revenue, revPerLand: s.lands ? s.revenue/s.lands : 0
+    };
   }).sort((a,b)=>b.lands-a.lands);
 
-  // Page Value: grouped by the page the lead actually converted on.
-  // "Views" is a proxy for page traffic using lead volume — WhatConverts'
-  // leads API only exposes conversions, not raw page-view/session counts.
+  // Page Value: grouped by page. WhatConverts' leads API only records two
+  // touchpoints per lead — the landing page (session start) and the lead
+  // page (where the conversion happened) — it does not expose a full
+  // page-view/session log, so there's no way to count every time a page
+  // was seen during a visitor's journey. "Page Touches" is the closest
+  // honest proxy: each lead counts once per page if that page was either
+  // its landing page or its lead page (deduped if they're the same page),
+  // so a page that was browsed but not converted on still shows up here.
+  // Sales/Revenue stay attributed to the page the lead actually converted
+  // on (lead_url), so Page Value reflects real conversion value per touch.
   const pageValueStats = {};
   curr.forEach(l => {
-    const p = pagePath(l.lead_url);
-    if (!p) return;
-    if (!pageValueStats[p]) pageValueStats[p] = {views:0,sales:0,revenue:0};
-    const s = pageValueStats[p];
-    s.views++;
-    if (!l.duplicate && hasSalesValue(l)) { s.sales++; s.revenue += Number(l.sales_value); }
+    const landP = pagePath(l.landing_url), leadP = pagePath(l.lead_url);
+    new Set([landP, leadP].filter(Boolean)).forEach(p => {
+      if (!pageValueStats[p]) pageValueStats[p] = {touches:0,sales:0,revenue:0};
+      pageValueStats[p].touches++;
+    });
+    if (!l.duplicate && hasSalesValue(l) && leadP) {
+      if (!pageValueStats[leadP]) pageValueStats[leadP] = {touches:0,sales:0,revenue:0};
+      pageValueStats[leadP].sales++;
+      pageValueStats[leadP].revenue += Number(l.sales_value);
+    }
   });
   const pageValueRows = Object.keys(pageValueStats).map(p => {
     const s = pageValueStats[p];
-    return { page:p, views:s.views, sales:s.sales, revenue:s.revenue, pageValue: s.views ? s.revenue/s.views : 0 };
-  }).sort((a,b)=>b.views-a.views);
+    return { page:p, touches:s.touches, sales:s.sales, revenue:s.revenue, pageValue: s.touches ? s.revenue/s.touches : 0 };
+  }).sort((a,b)=>b.touches-a.touches);
 
   // Drill-down and the day-by-day views should only reflect leads within the
   // selected range, not the extended fetch (which also covers the prior
@@ -1276,43 +1303,67 @@ function renderAnalysis() {
     {label:'ROAS (Prior)',key:'roasP',roas:true}
   ];
 
+  const tabBtn = (n,label) => `<button class="tab-btn ${activeMainTab===n?'active':''}" onclick="setMainTab(${n})">${label}</button>`;
+  const tabDisplay = n => activeMainTab===n ? '' : 'display:none';
+
   document.getElementById('main').innerHTML = `
     ${dropDate?`<div class="drop-alert">Keyword tracking drop detected: coverage fell below 50% from <strong>${dropDate}</strong>. Check the WhatConverts script and cookie consent settings around that date.</div>`:''}
     ${revenueLagWarning?`<div class="drop-alert">Revenue for this period is likely incomplete: sales are recorded a median of <strong>19 days</strong> after the lead date, and your selected range ends only ${daysSinceRangeEnd} day${daysSinceRangeEnd===1?'':'s'} ago. Revenue, Sales, and ROAS figures here will keep rising as more sales get logged over the next few weeks — treat them as a lower bound, not final.</div>`:''}
-    <div class="section">
-      <div class="section-hd">
-        <span>Overview</span>
-        <span class="note">Recent: ${dateFrom} to ${dateTo} / Prior: ${priorFrom} to ${priorTo}</span>
-        <button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadSummary()">Download Summary</button>
-      </div>
-      <div class="section-bd"><div class="kpi-grid">
-        <div class="kpi"><div class="kpi-val">${tc}</div><div class="kpi-label">Total Leads (recent)</div><div class="kpi-sub">prior: ${tp}</div></div>
-        <div class="kpi lime"><div class="kpi-val">${qc}</div><div class="kpi-label">Quotable Yes</div><div class="kpi-sub">prior: ${qp} &bull; ${qPc}% of total</div></div>
-        <div class="kpi lime"><div class="kpi-val">${qPc}%</div><div class="kpi-label">Booking Rate</div><div class="kpi-sub">prior: ${qPp}%</div></div>
-        <div class="kpi ${kwPc<50?'amber':''}"><div class="kpi-val">${kwPc}%</div><div class="kpi-label">Keyword Coverage</div><div class="kpi-sub">prior: ${kwPp}%</div></div>
-        <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
-        <div class="kpi"><div class="kpi-val">${sc}</div><div class="kpi-label">Sales</div><div class="kpi-sub">prior: ${sp}</div></div>
-        <div class="kpi lime"><div class="kpi-val">${fmtCurrency(rc)}</div><div class="kpi-label">Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(rp)}</div></div>
-        <div class="kpi"><div class="kpi-val">${fmtCurrency(cpcRevC)}</div><div class="kpi-label">CPC Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(cpcRevP)}</div></div>
-        <div class="kpi"><div class="kpi-val">${fmtCurrency(spendC)}</div><div class="kpi-label">Ad Spend (Google Ads)</div><div class="kpi-sub">prior: ${fmtCurrency(spendP)}</div></div>
-        <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS (CPC Revenue / Spend)</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
-      </div>
-      <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:10px">Note: sales are typically recorded a median of 19 days after the lead date, so revenue/sales figures for the last 2–3 weeks are usually incomplete and will rise as more sales get logged.</div>
-      </div>
+    <div class="tab-bar">
+      ${tabBtn(1,'Overview & Traffic')}
+      ${tabBtn(2,'Paid Search')}
+      ${tabBtn(3,'Pages')}
+      ${tabBtn(4,'Leads')}
     </div>
-    <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr, chartGranularity)}</div></div>
-    <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('source')}</div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source', paginate:true})}</div></div>
-    <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span>${exportButtonsHtml('campaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign', paginate:true})}</div></div>
-    <div class="two-col">
-      <div class="section"><div class="section-hd"><span>Quotable Breakdown</span>${exportButtonsHtml('quotable')}</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
-      <div class="section"><div class="section-hd"><span>Lead Type</span>${exportButtonsHtml('leadType')}</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
+
+    <div class="tab-panel" style="${tabDisplay(1)}">
+      <div class="section">
+        <div class="section-hd">
+          <span>Overview</span>
+          <span class="note">Recent: ${dateFrom} to ${dateTo} / Prior: ${priorFrom} to ${priorTo}</span>
+          <button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadSummary()">Download Summary</button>
+        </div>
+        <div class="section-bd"><div class="kpi-grid">
+          <div class="kpi"><div class="kpi-val">${tc}</div><div class="kpi-label">Total Leads (recent)</div><div class="kpi-sub">prior: ${tp}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${qc}</div><div class="kpi-label">Quotable Yes</div><div class="kpi-sub">prior: ${qp} &bull; ${qPc}% of total</div></div>
+          <div class="kpi lime"><div class="kpi-val">${qPc}%</div><div class="kpi-label">Booking Rate</div><div class="kpi-sub">prior: ${qPp}%</div></div>
+          <div class="kpi ${kwPc<50?'amber':''}"><div class="kpi-val">${kwPc}%</div><div class="kpi-label">Keyword Coverage</div><div class="kpi-sub">prior: ${kwPp}%</div></div>
+          <div class="kpi ${kc===0?'red':''}"><div class="kpi-val">${kc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${kp}</div></div>
+          <div class="kpi"><div class="kpi-val">${sc}</div><div class="kpi-label">Sales</div><div class="kpi-sub">prior: ${sp}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${fmtCurrency(rc)}</div><div class="kpi-label">Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(rp)}</div></div>
+          <div class="kpi"><div class="kpi-val">${fmtCurrency(cpcRevC)}</div><div class="kpi-label">CPC Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(cpcRevP)}</div></div>
+          <div class="kpi"><div class="kpi-val">${fmtCurrency(spendC)}</div><div class="kpi-label">Ad Spend (Google Ads)</div><div class="kpi-sub">prior: ${fmtCurrency(spendP)}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS (CPC Revenue / Spend)</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
+        </div>
+        <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:10px">Note: sales are typically recorded a median of 19 days after the lead date, so revenue/sales figures for the last 2–3 weeks are usually incomplete and will rise as more sales get logged.</div>
+        </div>
+      </div>
+      <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(curr, chartMetric, adsCurr, chartGranularity)}</div></div>
+      <div class="section"><div class="section-hd"><span>Traffic Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('source')}</div><div class="section-bd" style="overflow-x:auto">${tbl(sourceRows,[{label:'Source / Medium',key:'source'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}], {rowClick:'showSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'source', paginate:true})}</div></div>
     </div>
-    <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span>${exportButtonsHtml('kwTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme', paginate:true})}</div></div>
-    <div class="section"><div class="section-hd"><span>Raw Keywords</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span>${exportButtonsHtml('rawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showKeywordLeads', tableId:'rawKw', paginate:true})}</div></div>
-    <div class="section"><div class="section-hd"><span>Landing Pages</span><span class="note">Click a page to view its leads &bull; click a header to sort &bull; grouped by page path (query strings stripped)</span>${exportButtonsHtml('landingPages')}</div><div class="section-bd" style="overflow-x:auto">${tbl(landingRows,[{label:'Page',key:'page'},{label:'Lands',key:'lands',num:true},{label:'Leads',key:'leads',num:true},{label:'Booked Leads',key:'booked',num:true},{label:'Sales',key:'sales',num:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Revenue / Land',key:'revPerLand',num:true,currency:true}], {rowClick:'showLandingPageLeads', tableId:'landingPages', paginate:true})}</div></div>
-    <div class="section"><div class="section-hd"><span>Page Value</span><span class="note">Click a page to view its leads &bull; click a header to sort &bull; grouped by the page the lead converted on</span>${exportButtonsHtml('pageValue')}</div><div class="section-bd" style="overflow-x:auto">${tbl(pageValueRows,[{label:'Page',key:'page'},{label:'Views',key:'views',num:true},{label:'Sales',key:'sales',num:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Page Value',key:'pageValue',num:true,currency:true}], {rowClick:'showPageValueLeads', tableId:'pageValue', paginate:true})}</div></div>
-    <div class="section"><div class="section-hd"><span>Form Names</span>${exportButtonsHtml('formNames')}</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
-    <div class="section"><div class="section-hd"><span>Keyword Coverage by Date</span>${exportButtonsHtml('kwByDate')}</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}], {tableId:'kwByDate'})}</div></div>
+
+    <div class="tab-panel" style="${tabDisplay(2)}">
+      <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span>${exportButtonsHtml('campaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span>${exportButtonsHtml('kwTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Raw Keywords</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span>${exportButtonsHtml('rawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showKeywordLeads', tableId:'rawKw', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Keyword Coverage by Date</span>${exportButtonsHtml('kwByDate')}</div><div class="section-bd">${tbl(dateRows,[{label:'Date',key:'date'},{label:'Total',key:'total',num:true},{label:'With KW',key:'kw',num:true},{label:'No KW',key:'noKw',num:true},{label:'% KW',key:'kwPct',pct:true},{label:'Quotable Yes',key:'quot',num:true},{label:'% Quotable',key:'qPct',pct:true}], {tableId:'kwByDate'})}</div></div>
+    </div>
+
+    <div class="tab-panel" style="${tabDisplay(3)}">
+      <div class="section"><div class="section-hd"><span>Landing Pages</span><span class="note">Click a page to view its leads &bull; click a header to sort &bull; grouped by page path (query strings stripped)</span>${exportButtonsHtml('landingPages')}</div><div class="section-bd" style="overflow-x:auto">${tbl(landingRows,[{label:'Page',key:'page'},{label:'Lands',key:'lands',num:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking Rate',key:'bookingRate',pct:true},{label:'Sales',key:'sales',num:true},{label:'Sales %',key:'salesPct',pct:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Revenue / Land',key:'revPerLand',num:true,currency:true}], {rowClick:'showLandingPageLeads', tableId:'landingPages', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Page Value</span><span class="note">Click a page to view its leads &bull; click a header to sort</span>${exportButtonsHtml('pageValue')}</div><div class="section-bd" style="overflow-x:auto">
+        <div class="proxy-note">"Page Touches" counts a page once per lead if it was that lead's landing page or conversion page. WhatConverts' API doesn't expose a full page-view/session log, so this can't capture every individual view within a visitor's journey (that would need a separate analytics source like GA4) — it's the closest available proxy, not raw traffic.</div>
+        ${tbl(pageValueRows,[{label:'Page',key:'page'},{label:'Page Touches',key:'touches',num:true},{label:'Sales',key:'sales',num:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Page Value',key:'pageValue',num:true,currency:true}], {rowClick:'showPageValueLeads', tableId:'pageValue', paginate:true})}
+      </div></div>
+    </div>
+
+    <div class="tab-panel" style="${tabDisplay(4)}">
+      <div class="two-col">
+        <div class="section"><div class="section-hd"><span>Quotable Breakdown</span>${exportButtonsHtml('quotable')}</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
+        <div class="section"><div class="section-hd"><span>Lead Type</span>${exportButtonsHtml('leadType')}</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
+      </div>
+      <div class="section"><div class="section-hd"><span>Form Names</span>${exportButtonsHtml('formNames')}</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
+    </div>
   `;
 }
 </script>
