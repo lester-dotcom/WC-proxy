@@ -68,6 +68,10 @@
   .chart-avg-line { position: absolute; left: 0; right: 0; height: 0; border-top: 2px dashed #e53e3e; opacity: 0.7; }
   .chart-inner { display: flex; align-items: flex-end; gap: 4px; min-height: 130px; padding-top: 10px; position: relative; }
   .bar-grp { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: 1; min-width: 26px; max-width: 50px; }
+  /* The hourly Time of Day chart always has exactly 24 bars (never needs
+     horizontal scrolling like the main chart can with long date ranges), so
+     let its bars grow to fill the full section width instead of capping out. */
+  .bar-grp.wide { max-width: none; }
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 100px; }
   .bar { border-radius: 2px 2px 0 0; width: 11px; }
   .bar.t { background: #4c565c; }
@@ -998,7 +1002,7 @@ function renderHourChart(hourlyStatsAll) {
     const s = hourlyStatsAll[hourLabel(h)] || {curr:0,qCurr:0};
     const rate = s.curr ? Math.round(s.qCurr/s.curr*100) : 0;
     const tH = Math.round(s.curr/maxLeads*100);
-    return `<div class="bar-grp" title="${hourLabel(h)} — ${s.curr} lead${s.curr===1?'':'s'}, ${rate}% booking rate">
+    return `<div class="bar-grp wide" title="${hourLabel(h)} — ${s.curr} lead${s.curr===1?'':'s'}, ${rate}% booking rate">
       <div class="bars">
         <div class="bar t" style="height:${tH}px"></div>
         <div class="bar q" style="height:${rate}px"></div>
