@@ -576,22 +576,8 @@ function downloadSummary() {
     .map(s => `<tr><td>${s.source}</td><td>${s.curr}</td><td>${s.prev}</td><td>${changeText(s.change)}</td><td>${s.bookC}%</td><td>${fmtCurrency(s.revC)}</td></tr>`).join('');
 
   const filename = `lead-summary-${d.dateFrom}-to-${d.dateTo}.html`;
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lead Performance Summary</title><style>
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#2d3748;background:#fff;padding:32px;max-width:720px;margin:0 auto;line-height:1.6}
-    h1{font-size:20px;margin-bottom:4px}
-    .sub{color:#718096;font-size:12px;margin-bottom:20px}
-    .btn{border:none;border-radius:5px;padding:8px 18px;font-size:12px;font-weight:600;cursor:pointer;background:#aec90b;color:#2d3748;margin-bottom:24px}
-    ul{padding-left:20px;margin-bottom:20px}
-    li{margin-bottom:8px}
-    h2{font-size:14px;margin:24px 0 8px;color:#4c565c}
-    table{border-collapse:collapse;width:100%;margin-bottom:20px}
-    th{background:#f8fafc;color:#718096;text-align:left;padding:8px 10px;font-size:10px;text-transform:uppercase;border-bottom:2px solid #e2e8f0}
-    td{padding:7px 10px;border-bottom:1px solid #f0f4f8}
-    strong{color:#4c565c}
-  </style></head><body>
-    <h1>Lead Performance Summary</h1>
-    <div class="sub">Period: ${d.dateFrom} to ${d.dateTo} (compared to ${d.priorFrom} to ${d.priorTo}) &bull; ${filterDesc}</div>
-    <button class="btn" id="dl">Download this summary</button>
+  const subtitle = `Period: ${d.dateFrom} to ${d.dateTo} (compared to ${d.priorFrom} to ${d.priorTo}) &bull; ${filterDesc}`;
+  const body = `
     <ul>
       <li>You received <strong>${d.tc} leads</strong> in this period, ${trendClause(d.tc, d.tp)}.</li>
       <li><strong>${d.qPc}%</strong> of leads were marked as bookable, ${trendClause(d.qPc, d.qPp, v=>v+'%')}.</li>
@@ -602,10 +588,41 @@ function downloadSummary() {
     <h2>Top Performing Themes</h2>
     <table><thead><tr><th>Theme</th><th>Recent</th><th>Prior</th><th>Change</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${themeRows}</tbody></table>
     <h2>Top Traffic Sources</h2>
-    <table><thead><tr><th>Source / Medium</th><th>Recent</th><th>Prior</th><th>Change</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${sourceRowsHtml}</tbody></table>
+    <table><thead><tr><th>Source / Medium</th><th>Recent</th><th>Prior</th><th>Change</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${sourceRowsHtml}</tbody></table>`;
+  openSummaryWindow(summaryPageHtml('Lead Performance Summary', subtitle, body), filename);
+}
+
+// Shared shell for every summary-download page in this file: the same
+// styling, the same "Download this summary" button, and — see the comment
+// in openLeadsWindow — no inline script tag in the generated page, since
+// that closing tag's text, written literally anywhere in this source file
+// (even inside a comment), would prematurely end this page's own script
+// block. The download button is wired up from the parent instead, via the
+// window.open() return reference + a load listener.
+function summaryPageHtml(title, subtitle, bodyHtml) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title><style>
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#2d3748;background:#fff;padding:32px;max-width:720px;margin:0 auto;line-height:1.6}
+    h1{font-size:20px;margin-bottom:4px}
+    .sub{color:#718096;font-size:12px;margin-bottom:20px}
+    .btn{border:none;border-radius:5px;padding:8px 18px;font-size:12px;font-weight:600;cursor:pointer;background:#aec90b;color:#2d3748;margin-bottom:24px}
+    ul{padding-left:20px;margin-bottom:20px}
+    li{margin-bottom:8px}
+    h2{font-size:14px;margin:24px 0 8px;color:#4c565c}
+    h3{font-size:12px;margin:16px 0 6px;color:#718096;text-transform:uppercase;letter-spacing:0.03em}
+    table{border-collapse:collapse;width:100%;margin-bottom:20px}
+    th{background:#f8fafc;color:#718096;text-align:left;padding:8px 10px;font-size:10px;text-transform:uppercase;border-bottom:2px solid #e2e8f0}
+    td{padding:7px 10px;border-bottom:1px solid #f0f4f8}
+    strong{color:#4c565c}
+    .empty-note{color:#a0aec0;font-style:italic;font-size:12px;margin-bottom:16px}
+  </style></head><body>
+    <h1>${title}</h1>
+    <div class="sub">${subtitle}</div>
+    <button class="btn" id="dl">Download this summary</button>
+    ${bodyHtml}
   </body></html>`;
-  // See the comment in openLeadsWindow: no inline <script> here, for the
-  // same reason (it would prematurely close this page's own script tag).
+}
+
+function openSummaryWindow(html, filename) {
   const win = window.open(URL.createObjectURL(new Blob([html], {type: 'text/html'})), '_blank');
   if (win) {
     win.addEventListener('load', () => {
@@ -621,6 +638,130 @@ function downloadSummary() {
       };
     });
   }
+}
+
+// Thresholds for the PPC summary's recommendation engine, kept deliberately
+// conservative (real spend/volume baselines) so it surfaces genuine signal
+// rather than noise from tiny numbers — e.g. without PPC_MIN_PREV_FOR_TREND_FLAG,
+// a keyword going from 1 lead to 2 would show as a "+100%" spike.
+const PPC_MIN_SPEND_FOR_ROAS_FLAG = 20;   // ignore trivial ad spend
+const PPC_LOW_ROAS_THRESHOLD = 1;         // spending more than the CPC revenue it's returned
+const PPC_MIN_PREV_FOR_TREND_FLAG = 3;    // ignore % swings on a tiny prior base
+const PPC_SIGNIFICANT_DROP_PCT = -30;
+const PPC_SIGNIFICANT_RISE_PCT = 50;
+
+function pctChangeOf(curr, prev) {
+  if (prev) return Math.round((curr-prev)/prev*100);
+  return curr>0 ? null : 0; // null = new this period, no prior baseline to compare against
+}
+
+// Splits a set of rows (campaigns, keyword themes, or raw keywords — any row
+// shaped by statsToRow + applySpendToRow) into the three PPC recommendation
+// buckets. A row can land in more than one bucket (e.g. dropped AND low ROAS).
+function ppcFindings(rows) {
+  const lowRoas = [], dropped = [], picked = [];
+  rows.forEach(r => {
+    if (r.spendC >= PPC_MIN_SPEND_FOR_ROAS_FLAG && (r.roasC == null || r.roasC < PPC_LOW_ROAS_THRESHOLD)) {
+      lowRoas.push(r);
+    }
+    const pct = pctChangeOf(r.curr, r.prev);
+    if (r.prev >= PPC_MIN_PREV_FOR_TREND_FLAG && pct != null && pct <= PPC_SIGNIFICANT_DROP_PCT) {
+      dropped.push({...r, pct});
+    } else if (pct != null && pct >= PPC_SIGNIFICANT_RISE_PCT && r.prev >= PPC_MIN_PREV_FOR_TREND_FLAG) {
+      picked.push({...r, pct});
+    } else if (pct == null && r.curr >= PPC_MIN_PREV_FOR_TREND_FLAG) {
+      picked.push({...r, pct: null});
+    }
+  });
+  lowRoas.sort((a,b)=>b.spendC-a.spendC);
+  dropped.sort((a,b)=>a.change-b.change);
+  picked.sort((a,b)=>b.curr-a.curr);
+  return { lowRoas, dropped, picked };
+}
+
+function ppcFindingBullets(rows, labelKey, kind, limit) {
+  return rows.slice(0, limit).map(r => {
+    const label = r[labelKey];
+    if (kind === 'lowRoas') {
+      return `<li><strong>${label}</strong> spent ${fmtCurrency(r.spendC)} but returned only <strong>${r.roasC.toFixed(2)}x ROAS</strong> (${fmtCurrency(r.revC)} revenue from ${r.curr} lead${r.curr===1?'':'s'}, ${r.bookC}% booking rate).</li>`;
+    }
+    if (kind === 'dropped') {
+      return `<li><strong>${label}</strong> leads are down <strong>${Math.abs(r.pct)}%</strong> (${r.prev} &rarr; ${r.curr}), revenue ${fmtCurrency(r.revP)} &rarr; ${fmtCurrency(r.revC)}${r.spendC?`, spend ${fmtCurrency(r.spendC)}`:''}.</li>`;
+    }
+    const trend = r.pct==null ? 'is new this period' : `is up <strong>${r.pct}%</strong>`;
+    return `<li><strong>${label}</strong> ${trend} (${r.prev} &rarr; ${r.curr} leads), revenue ${fmtCurrency(r.revP)} &rarr; ${fmtCurrency(r.revC)}${r.spendC?`, spend ${fmtCurrency(r.spendC)}`:''}.</li>`;
+  }).join('');
+}
+
+function ppcCategoryHtml(categoryTitle, rows, labelKey, limitEach) {
+  const f = ppcFindings(rows);
+  const blocks = [
+    ['Spending without a return', f.lowRoas, 'lowRoas'],
+    ['Dropped significantly', f.dropped, 'dropped'],
+    ['Picked up this period', f.picked, 'picked']
+  ].map(([title, bucket, kind]) => {
+    const bullets = ppcFindingBullets(bucket, labelKey, kind, limitEach);
+    return bullets ? `<h3>${title}</h3><ul>${bullets}</ul>` : '';
+  }).filter(Boolean).join('');
+  if (!blocks) return `<h2>${categoryTitle}</h2><div class="empty-note">Nothing notable to flag for ${categoryTitle.toLowerCase()} this period.</div>`;
+  return `<h2>${categoryTitle}</h2>${blocks}`;
+}
+
+function downloadPpcSummary() {
+  if (!lastSummaryData) return;
+  const d = lastSummaryData;
+  const filename = `ppc-summary-${d.dateFrom}-to-${d.dateTo}.html`;
+  const subtitle = `Period: ${d.dateFrom} to ${d.dateTo} (compared to ${d.priorFrom} to ${d.priorTo}) &bull; Google / CPC leads only`;
+  const overview = `
+    <ul>
+      <li>PPC generated <strong>${d.ppcTc} leads</strong>, ${trendClause(d.ppcTc, d.ppcTp)}.</li>
+      <li><strong>${d.ppcQPc}%</strong> booking rate, ${trendClause(d.ppcQPc, d.ppcQPp, v=>v+'%')}.</li>
+      <li><strong>${d.ppcSc} sales</strong> generating <strong>${fmtCurrency(d.cpcRevC)}</strong> revenue, ${trendClause(d.cpcRevC, d.cpcRevP, fmtCurrency)}.</li>
+      <li>Ad spend was <strong>${fmtCurrency(d.spendC)}</strong>, ${trendClause(d.spendC, d.spendP, fmtCurrency)}, for a ROAS of <strong>${d.roasC!=null?d.roasC.toFixed(2)+'x':'n/a'}</strong>${d.roasP!=null?` (prior: ${d.roasP.toFixed(2)}x)`:''}.</li>
+    </ul>`;
+  const body = overview
+    + ppcCategoryHtml('Campaigns', d.campaignRows, 'campaign', 4)
+    + ppcCategoryHtml('Keyword Groups', d.kwThemeRows, 'theme', 4)
+    + ppcCategoryHtml('Individual Keywords', d.rawKwRows, 'keyword', 3);
+  openSummaryWindow(summaryPageHtml('PPC Performance Summary', subtitle, body), filename);
+}
+
+function downloadPagesSummary() {
+  if (!lastSummaryData) return;
+  const d = lastSummaryData;
+  const filename = `pages-summary-${d.dateFrom}-to-${d.dateTo}.html`;
+  const subtitle = `Period: ${d.dateFrom} to ${d.dateTo} (compared to ${d.priorFrom} to ${d.priorTo})`;
+  const landingRowsHtml = d.landingRows.slice(0,5)
+    .map(r => `<tr><td>${r.page}</td><td>${r.lands}</td><td>${r.bookingRate}%</td><td>${r.sales}</td><td>${fmtCurrency(r.revenue)}</td><td>${fmtCurrency(r.revPerLand)}</td></tr>`).join('');
+  const pageValueRowsHtml = d.pageValueRows.slice(0,5)
+    .map(r => `<tr><td>${r.page}</td><td>${r.touches}</td><td>${r.sales}</td><td>${fmtCurrency(r.revenue)}</td><td>${fmtCurrency(r.pageValue)}</td></tr>`).join('');
+  const body = `
+    <h2>Top Landing Pages by Volume</h2>
+    <table><thead><tr><th>Page</th><th>Lands</th><th>Booking Rate</th><th>Sales</th><th>Revenue</th><th>Revenue / Land</th></tr></thead><tbody>${landingRowsHtml}</tbody></table>
+    <h2>Top Pages by Touches</h2>
+    <table><thead><tr><th>Page</th><th>Page Touches</th><th>Sales</th><th>Revenue</th><th>Page Value</th></tr></thead><tbody>${pageValueRowsHtml}</tbody></table>`;
+  openSummaryWindow(summaryPageHtml('Pages Performance Summary', subtitle, body), filename);
+}
+
+function downloadLeadsSummary() {
+  if (!lastSummaryData) return;
+  const d = lastSummaryData;
+  const filename = `leads-summary-${d.dateFrom}-to-${d.dateTo}.html`;
+  const subtitle = `Period: ${d.dateFrom} to ${d.dateTo} (compared to ${d.priorFrom} to ${d.priorTo})`;
+  const typeRowsHtml = d.typeRows
+    .map(r => `<tr><td>${r.type}</td><td>${r.curr}</td><td>${r.prev}</td><td>${r.booked}</td><td>${r.bookRate}%</td></tr>`).join('');
+  const formRowsHtml = d.formRows.slice(0,5)
+    .map(r => `<tr><td>${r.form}</td><td>${r.curr}</td><td>${r.prev}</td><td>${r.booked}</td><td>${r.bookRate}%</td></tr>`).join('');
+  const chunkRowsHtml = d.chunkRows
+    .map(r => `<tr><td>${r.chunk}</td><td>${r.curr}</td><td>${r.prev}</td><td>${r.bookC}%</td><td>${fmtCurrency(r.revC)}</td></tr>`).join('');
+  const body = `
+    <h2>Lead Type</h2>
+    <table><thead><tr><th>Type</th><th>Recent</th><th>Prior</th><th>Booked</th><th>Booking %</th></tr></thead><tbody>${typeRowsHtml}</tbody></table>
+    <h2>Top Forms</h2>
+    <table><thead><tr><th>Form</th><th>Recent</th><th>Prior</th><th>Booked</th><th>Booking %</th></tr></thead><tbody>${formRowsHtml}</tbody></table>
+    <h2>Time of Day</h2>
+    <table><thead><tr><th>Time of Day</th><th>Recent</th><th>Prior</th><th>Booking %</th><th>Revenue</th></tr></thead><tbody>${chunkRowsHtml}</tbody></table>`;
+  openSummaryWindow(summaryPageHtml('Leads Breakdown Summary', subtitle, body), filename);
 }
 
 const CURRENCY_SYMBOL = '£';
@@ -1420,7 +1561,14 @@ function renderAnalysis() {
     }
   }
 
-  lastSummaryData = { leads, curr, prev, dateFrom, dateTo, priorFrom, priorTo, tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp, cpcRevC, cpcRevP, spendC, spendP, roasC, roasP, kwThemeRows, sourceRows, campaignRows };
+  lastSummaryData = {
+    leads, curr, prev, dateFrom, dateTo, priorFrom, priorTo,
+    tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp,
+    cpcRevC, cpcRevP, spendC, spendP, roasC, roasP,
+    kwThemeRows, sourceRows, campaignRows, rawKwRows,
+    landingRows, pageValueRows, typeRows, formRows, chunkRows,
+    ppcTc, ppcTp, ppcQc, ppcQp, ppcQPc, ppcQPp, ppcKc, ppcKp, ppcKwPc, ppcKwPp, ppcSc, ppcSp
+  };
 
   const SPEND_ROAS_COLS = [
     {label:'Spend',key:'spendC',num:true,currency:true},
@@ -1474,6 +1622,7 @@ function renderAnalysis() {
         <div class="section-hd">
           <span>PPC Overview</span>
           <span class="note">Google / CPC leads only &bull; Recent: ${dateFrom} to ${dateTo} / Prior: ${priorFrom} to ${priorTo}</span>
+          <button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadPpcSummary()">Download Summary</button>
         </div>
         <div class="section-bd"><div class="kpi-grid">
           <div class="kpi"><div class="kpi-val">${ppcTc}</div><div class="kpi-label">Total Leads (recent)</div><div class="kpi-sub">prior: ${ppcTp}</div></div>
@@ -1495,7 +1644,7 @@ function renderAnalysis() {
     </div>
 
     <div class="tab-panel" style="${tabDisplay(3)}">
-      <div class="section"><div class="section-hd"><span>Landing Pages</span><span class="note">Click a page to view its leads &bull; click a header to sort &bull; grouped by page path (query strings stripped)</span>${exportButtonsHtml('landingPages')}</div><div class="section-bd" style="overflow-x:auto">${tbl(landingRows,[{label:'Page',key:'page'},{label:'Lands',key:'lands',num:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking Rate',key:'bookingRate',pct:true},{label:'Sales',key:'sales',num:true},{label:'Sales %',key:'salesPct',pct:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Revenue / Land',key:'revPerLand',num:true,currency:true}], {rowClick:'showLandingPageLeads', tableId:'landingPages', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Landing Pages</span><span class="note">Click a page to view its leads &bull; click a header to sort &bull; grouped by page path (query strings stripped)</span><button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadPagesSummary()">Download Summary</button>${exportButtonsHtml('landingPages')}</div><div class="section-bd" style="overflow-x:auto">${tbl(landingRows,[{label:'Page',key:'page'},{label:'Lands',key:'lands',num:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking Rate',key:'bookingRate',pct:true},{label:'Sales',key:'sales',num:true},{label:'Sales %',key:'salesPct',pct:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Revenue / Land',key:'revPerLand',num:true,currency:true}], {rowClick:'showLandingPageLeads', tableId:'landingPages', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Page Value</span><span class="note">Click a page to view its leads &bull; click a header to sort</span>${exportButtonsHtml('pageValue')}</div><div class="section-bd" style="overflow-x:auto">
         <div class="proxy-note">"Page Touches" counts a page once per lead if it was that lead's landing page or conversion page. WhatConverts' API doesn't expose a full page-view/session log, so this can't capture every individual view within a visitor's journey (that would need a separate analytics source like GA4) — it's the closest available proxy, not raw traffic.</div>
         ${tbl(pageValueRows,[{label:'Page',key:'page'},{label:'Page Touches',key:'touches',num:true},{label:'Sales',key:'sales',num:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Page Value',key:'pageValue',num:true,currency:true}], {rowClick:'showPageValueLeads', tableId:'pageValue', paginate:true})}
@@ -1504,7 +1653,7 @@ function renderAnalysis() {
 
     <div class="tab-panel" style="${tabDisplay(4)}">
       <div class="two-col">
-        <div class="section"><div class="section-hd"><span>Quotable Breakdown</span>${exportButtonsHtml('quotable')}</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
+        <div class="section"><div class="section-hd"><span>Quotable Breakdown</span><button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadLeadsSummary()">Download Summary</button>${exportButtonsHtml('quotable')}</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
         <div class="section"><div class="section-hd"><span>Lead Type</span>${exportButtonsHtml('leadType')}</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% Change',key:'pctChange',changePct:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking %',key:'bookRate',pct:true}], {tableId:'leadType'})}</div></div>
       </div>
       <div class="section"><div class="section-hd"><span>Form Names</span>${exportButtonsHtml('formNames')}</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking %',key:'bookRate',pct:true},{label:'Status',key:'status',statusPill:true}], {tableId:'formNames'})}</div></div>
