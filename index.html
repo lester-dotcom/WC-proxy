@@ -812,10 +812,25 @@ function roasPill(v) {
   if (v == null) return pill('–','s');
   return pill(v.toFixed(2)+'x', v>=4?'g':v>=1?'b':'r');
 }
+// For period-over-period % change columns. null means the prior period was
+// zero (no baseline to compute a % against), shown as "New" rather than a
+// misleading +Infinity%.
+function changePctPill(v) {
+  if (v == null) return pill('New','g');
+  const n = Number(v);
+  if (n>0) return pill('+'+n+'%','g');
+  if (n<0) return pill(n+'%','r');
+  return pill('0%','s');
+}
 const sortNum = v => v==null || Number.isNaN(Number(v)) ? -Infinity : Number(v);
 
 function cellExportValue(c, v) {
   if (c.roas) return v==null ? '' : v.toFixed(2)+'x';
+  if (c.changePct) {
+    if (v==null) return 'New';
+    const n = Number(v);
+    return (n>0?'+':n<0?'-':'') + Math.abs(n) + '%';
+  }
   if (c.pct) return (v??0)+'%';
   if (c.change) {
     const n = Number(v);
@@ -828,13 +843,13 @@ function cellExportValue(c, v) {
 
 function tbl(rows, cols, opts) {
   opts = opts || {};
-  const clsFor = c => (c.pct||c.change||c.roas) ? 'ctr' : c.num ? 'num' : '';
+  const clsFor = c => (c.pct||c.change||c.changePct||c.roas) ? 'ctr' : c.num ? 'num' : '';
 
   const sortState = opts.tableId ? tableSortState[opts.tableId] : null;
   let displayRows = rows;
   if (sortState) {
     const col = cols.find(c => c.key === sortState.colKey);
-    const numeric = col && (col.num || col.pct || col.change || col.roas);
+    const numeric = col && (col.num || col.pct || col.change || col.changePct || col.roas);
     displayRows = rows.slice().sort((a,b) => {
       const av = a[sortState.colKey], bv = b[sortState.colKey];
       const cmp = numeric ? (sortNum(av)-sortNum(bv)) : String(av??'').localeCompare(String(bv??''));
@@ -880,6 +895,7 @@ function tbl(rows, cols, opts) {
       const v = r[c.key];
       let content;
       if (c.pct)    content = pctPill(Number(v));
+      else if (c.changePct) content = changePctPill(v);
       else if (c.change) content = changePill(Number(v), c.currency);
       else if (c.roas)   content = roasPill(v);
       else if (c.num)    content = c.currency ? fmtCurrency(v) : v;
@@ -1154,6 +1170,16 @@ function renderAnalysis() {
   const roasC = spendC ? cpcRevC/spendC : null;
   const roasP = spendP ? cpcRevP/spendP : null;
 
+  // Mirrors the main Overview KPIs above, but scoped to google/cpc leads
+  // only, for the PPC-focused Overview at the top of the Paid Search tab.
+  const cpcCurr = curr.filter(isGoogleCpc), cpcPrev = prev.filter(isGoogleCpc);
+  const ppcTc = cpcCurr.length, ppcTp = cpcPrev.length;
+  const ppcQc = cpcCurr.filter(l=>l.quotable==='Yes').length, ppcQp = cpcPrev.filter(l=>l.quotable==='Yes').length;
+  const ppcQPc = ppcTc?Math.round(ppcQc/ppcTc*100):0, ppcQPp = ppcTp?Math.round(ppcQp/ppcTp*100):0;
+  const ppcKc = cpcCurr.filter(l=>l.lead_keyword).length, ppcKp = cpcPrev.filter(l=>l.lead_keyword).length;
+  const ppcKwPc = ppcTc?Math.round(ppcKc/ppcTc*100):0, ppcKwPp = ppcTp?Math.round(ppcKp/ppcTp*100):0;
+  const ppcSc = cpcCurr.filter(hasSalesValue).length, ppcSp = cpcPrev.filter(hasSalesValue).length;
+
   const quotRows = ['Yes','Pending','No'].map(v=>({
     status:v, curr:curr.filter(l=>l.quotable===v).length, prev:prev.filter(l=>l.quotable===v).length,
     change:curr.filter(l=>l.quotable===v).length-prev.filter(l=>l.quotable===v).length,
@@ -1161,10 +1187,15 @@ function renderAnalysis() {
   }));
 
   const ltC=countBy(curr,l=>l.lead_type), ltP=countBy(prev,l=>l.lead_type);
-  const typeRows=Object.keys({...ltC,...ltP}).map(t=>({
-    type:t,curr:ltC[t]||0,prev:ltP[t]||0,change:(ltC[t]||0)-(ltP[t]||0),
-    pct:tc?Math.round((ltC[t]||0)/tc*100):0
-  })).sort((a,b)=>b.curr-a.curr);
+  const ltQC=countBy(curr.filter(l=>l.quotable==='Yes'),l=>l.lead_type);
+  const typeRows=Object.keys({...ltC,...ltP}).map(t=>{
+    const c=ltC[t]||0, p=ltP[t]||0, booked=ltQC[t]||0;
+    return {
+      type:t, curr:c, prev:p, change:c-p,
+      pctChange: p ? Math.round((c-p)/p*100) : (c>0?null:0),
+      booked, bookRate: c?Math.round(booked/c*100):0
+    };
+  }).sort((a,b)=>b.curr-a.curr);
 
   const srcMap = buildCanonicalMap(leads.map(l => l.lead_source));
   const medMap = buildCanonicalMap(leads.map(l => l.lead_medium));
@@ -1274,10 +1305,12 @@ function renderAnalysis() {
   lastRenderedLeads = curr;
 
   const fC=countBy(curr,l=>l.form_name), fP=countBy(prev,l=>l.form_name);
+  const fQC=countBy(curr.filter(l=>l.quotable==='Yes'),l=>l.form_name);
   const formRows=Object.keys({...fC,...fP}).filter(k=>k&&k!=='undefined').map(k=>{
-    const c=fC[k]||0,p=fP[k]||0,diff=c-p;
+    const c=fC[k]||0,p=fP[k]||0,diff=c-p,booked=fQC[k]||0;
     const st=c===0&&p>0?'Lost':c>0&&p===0?'New':diff<-2?'Declined':diff>2?'Increased':'Stable';
     return {form:k.length>50?k.slice(0,47)+'...':k,curr:c,prev:p,change:diff,
+      booked, bookRate: c?Math.round(booked/c*100):0,
       status:st==='Lost'?pill('Lost','r'):st==='New'?pill('New','g'):st==='Declined'?pill('Declined','a'):st==='Increased'?pill('Increased','g'):pill('Stable','s')};
   }).sort((a,b)=>b.curr-a.curr);
 
@@ -1343,6 +1376,24 @@ function renderAnalysis() {
     </div>
 
     <div class="tab-panel" style="${tabDisplay(2)}">
+      <div class="section">
+        <div class="section-hd">
+          <span>PPC Overview</span>
+          <span class="note">Google / CPC leads only &bull; Recent: ${dateFrom} to ${dateTo} / Prior: ${priorFrom} to ${priorTo}</span>
+        </div>
+        <div class="section-bd"><div class="kpi-grid">
+          <div class="kpi"><div class="kpi-val">${ppcTc}</div><div class="kpi-label">Total Leads (recent)</div><div class="kpi-sub">prior: ${ppcTp}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${ppcQc}</div><div class="kpi-label">Quotable Yes</div><div class="kpi-sub">prior: ${ppcQp} &bull; ${ppcQPc}% of total</div></div>
+          <div class="kpi lime"><div class="kpi-val">${ppcQPc}%</div><div class="kpi-label">Booking Rate</div><div class="kpi-sub">prior: ${ppcQPp}%</div></div>
+          <div class="kpi ${ppcKwPc<50?'amber':''}"><div class="kpi-val">${ppcKwPc}%</div><div class="kpi-label">Keyword Coverage</div><div class="kpi-sub">prior: ${ppcKwPp}%</div></div>
+          <div class="kpi ${ppcKc===0?'red':''}"><div class="kpi-val">${ppcKc}</div><div class="kpi-label">Leads With Keyword</div><div class="kpi-sub">prior: ${ppcKp}</div></div>
+          <div class="kpi"><div class="kpi-val">${ppcSc}</div><div class="kpi-label">Sales</div><div class="kpi-sub">prior: ${ppcSp}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${fmtCurrency(cpcRevC)}</div><div class="kpi-label">Revenue</div><div class="kpi-sub">prior: ${fmtCurrency(cpcRevP)}</div></div>
+          <div class="kpi"><div class="kpi-val">${fmtCurrency(spendC)}</div><div class="kpi-label">Ad Spend</div><div class="kpi-sub">prior: ${fmtCurrency(spendP)}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
+        </div></div>
+      </div>
+      <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} PPC Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(cpcCurr, chartMetric, adsCurr, chartGranularity)}</div></div>
       <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span>${exportButtonsHtml('campaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span>${exportButtonsHtml('kwTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Raw Keywords</span><span class="note">Click a keyword to view its leads &bull; click a header to sort</span>${exportButtonsHtml('rawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(rawKwRows,[{label:'Keyword',key:'keyword'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showKeywordLeads', tableId:'rawKw', paginate:true})}</div></div>
@@ -1360,9 +1411,9 @@ function renderAnalysis() {
     <div class="tab-panel" style="${tabDisplay(4)}">
       <div class="two-col">
         <div class="section"><div class="section-hd"><span>Quotable Breakdown</span>${exportButtonsHtml('quotable')}</div><div class="section-bd">${tbl(quotRows,[{label:'Status',key:'status'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% of Total',key:'pct',pct:true}], {tableId:'quotable'})}</div></div>
-        <div class="section"><div class="section-hd"><span>Lead Type</span>${exportButtonsHtml('leadType')}</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'%',key:'pct',pct:true}], {tableId:'leadType'})}</div></div>
+        <div class="section"><div class="section-hd"><span>Lead Type</span>${exportButtonsHtml('leadType')}</div><div class="section-bd">${tbl(typeRows,[{label:'Type',key:'type'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'% Change',key:'pctChange',changePct:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking %',key:'bookRate',pct:true}], {tableId:'leadType'})}</div></div>
       </div>
-      <div class="section"><div class="section-hd"><span>Form Names</span>${exportButtonsHtml('formNames')}</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
+      <div class="section"><div class="section-hd"><span>Form Names</span>${exportButtonsHtml('formNames')}</div><div class="section-bd">${tbl(formRows,[{label:'Form',key:'form'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking %',key:'bookRate',pct:true},{label:'Status',key:'status'}], {tableId:'formNames'})}</div></div>
     </div>
   `;
 }
