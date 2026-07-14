@@ -230,6 +230,11 @@ let currentPabauAppointments = [];
 let pabauFetchedFrom = '';
 let pabauFetchedTo = '';
 
+// Same lazy-fetch pattern as appointments, but for the Invoices tab.
+let currentPabauInvoices = [];
+let invoicesFetchedFrom = '';
+let invoicesFetchedTo = '';
+
 function parseCsv(text) {
   const rows = [];
   let row = [], field = '', inQuotes = false;
@@ -330,6 +335,9 @@ let lastSummaryData = null;
 // render — the Attendance tab's drill-down links filter this the same way
 // lastRenderedLeads backs every other tab's drill-down links.
 let lastRenderedAttendance = [];
+// One entry per lead with a matched invoice in range, refreshed on every
+// render — backs the Invoices tab's drill-down links.
+let lastRenderedInvoiceLeads = [];
 
 // Per-table sort state, keyed by the tableId passed to tbl(). Persists across
 // re-renders (filter changes, chart metric switches) within the session.
@@ -358,6 +366,18 @@ async function setMainTab(n) {
       setStatus(`${currentPabauAppointments.length} Pabau appointments loaded`, 'ok');
     } catch(e) {
       setStatus('Error loading Pabau appointments: ' + e.message, 'err');
+      console.error(e);
+    }
+  }
+  if (n === 6 && currentDateFrom && (invoicesFetchedFrom !== currentDateFrom || invoicesFetchedTo !== currentDateTo)) {
+    setStatus('Fetching Pabau invoices...', 'loading');
+    try {
+      currentPabauInvoices = await fetchInvoicesInRange(currentDateFrom, currentDateTo);
+      invoicesFetchedFrom = currentDateFrom;
+      invoicesFetchedTo = currentDateTo;
+      setStatus(`${currentPabauInvoices.length} Pabau invoices loaded`, 'ok');
+    } catch(e) {
+      setStatus('Error loading Pabau invoices: ' + e.message, 'err');
       console.error(e);
     }
   }
@@ -585,6 +605,14 @@ function showAttendThemeLeads(encodedKey, encodedLabel) {
 function showAttendKeywordLeads(encodedKey, encodedLabel) {
   const keyword = decodeURIComponent(encodedKey);
   const leads = lastRenderedAttendance.filter(r => r.lead && r.rawKwKeyVal === keyword).map(r => r.lead);
+  openLeadsWindow(leads, decodeURIComponent(encodedLabel));
+}
+
+// Each Invoices tab row already represents a single lead, so this just opens
+// that one lead's detail rather than filtering a group.
+function showInvoiceLead(encodedLeadId, encodedLabel) {
+  const leadId = decodeURIComponent(encodedLeadId);
+  const leads = lastRenderedInvoiceLeads.filter(r => String(r.lead.lead_id) === leadId).map(r => r.lead);
   openLeadsWindow(leads, decodeURIComponent(encodedLabel));
 }
 
@@ -897,6 +925,20 @@ function matchApptToLead(appt, index) {
       || null;
 }
 
+// Same match logic as matchApptToLead, but an invoice's client sub-object
+// uses lowercase field names (email/mobile/client_name) rather than the
+// appointment client sub-object's Email/Mobile/customer_name.
+function matchInvoiceToLead(inv, index) {
+  const client = (inv.client||[])[0] || {};
+  const email = normEmail(client.email);
+  const phone = normPhone(client.mobile);
+  const name  = normName(client.client_name);
+  return (email && index.byEmail[email])
+      || (phone && index.byPhone[phone])
+      || (name && index.byName[name])
+      || null;
+}
+
 // Pabau's appointment_status is free text configured per clinic, not a
 // fixed enum — confirmed against live data, values seen include "Waiting",
 // "Confirmed " (trailing space), "confirmed", "1st", "2nd",
@@ -1090,6 +1132,45 @@ async function fetchAllAppointments(dateFrom, dateTo) {
     setStatus(`Fetching... ${all.length} appointments loaded`, 'loading');
   }
   return all;
+}
+
+// Pabau invoice timestamps look like "14/07/2026 11:18" (DD/MM/YYYY HH:mm) --
+// this pulls just the date part and reorders it to YYYY-MM-DD so it can be
+// compared against the dateFrom/dateTo strings the rest of the dashboard uses.
+function parsePabauDateOnly(s) {
+  const datePart = (s||'').split(' ')[0];
+  const [d,m,y] = datePart.split('/');
+  if (!d||!m||!y) return '';
+  return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+}
+
+// Unlike appointments, Pabau's /invoices endpoint has no start_date/end_date
+// range filter -- only an exact single "date" param. Paginating unfiltered
+// (most-recent-first, confirmed against live data) and stopping once a page's
+// oldest invoice falls before dateFrom is the practical way to bound this
+// without looping one API call per calendar day. No practitioner/user_id
+// filter is applied here (unlike appointments) since an invoice's biller may
+// differ from whoever actually saw the client -- the email/phone/name match
+// against WC leads is what scopes this to real leads, not who processed
+// the payment.
+async function fetchInvoicesInRange(dateFrom, dateTo) {
+  let page = 1, all = [];
+  while (true) {
+    const data = await pabauFetch(`/invoices?per_page=${PABAU_PAGE_SIZE}&page=${page}`);
+    const invs = data.invoices || [];
+    all = all.concat(invs);
+    const oldestOnPage = invs.reduce((min, inv) => {
+      const d = parsePabauDateOnly((inv.details||{}).invoice_date);
+      return d && (!min || d < min) ? d : min;
+    }, '');
+    if (invs.length < PABAU_PAGE_SIZE || (oldestOnPage && oldestOnPage < dateFrom)) break;
+    page++;
+    setStatus(`Fetching... ${all.length} invoices loaded`, 'loading');
+  }
+  return all.filter(inv => {
+    const d = parsePabauDateOnly((inv.details||{}).invoice_date);
+    return d >= dateFrom && d <= dateTo;
+  });
 }
 
 // Groups values that only differ by case/whitespace, picking the most
@@ -1876,6 +1957,40 @@ function renderAnalysis() {
     attendanceStatsToRow('keyword', k, attendRawKwStats[k])
   ).sort((a,b)=>b.total-a.total);
 
+  // Invoices tab: matches Pabau invoices (fetched separately and lazily —
+  // see setMainTab) to WC leads via the same match index built above, then
+  // builds one row per lead with at least one matched invoice in range —
+  // days to their first invoice in range, and the revenue of their most
+  // recent invoice in range (not summed across invoices, per how this was
+  // scoped — just the latest one's value).
+  const invoicesByLead = {};
+  currentPabauInvoices.forEach(inv => {
+    const lead = matchInvoiceToLead(inv, leadMatchIndex);
+    if (!lead || !lead.lead_id) return;
+    const invDate = parsePabauDateOnly((inv.details||{}).invoice_date);
+    if (!invDate) return;
+    if (!invoicesByLead[lead.lead_id]) invoicesByLead[lead.lead_id] = { lead, invoices: [] };
+    invoicesByLead[lead.lead_id].invoices.push({ inv, invDate });
+  });
+  const invoiceLeadRows = Object.values(invoicesByLead).map(({lead, invoices}) => {
+    invoices.sort((a,b) => a.invDate < b.invDate ? -1 : a.invDate > b.invDate ? 1 : 0);
+    const firstInv = invoices[0], latestInv = invoices[invoices.length-1];
+    const leadDate = (lead.date_created||lead.lead_date||'').slice(0,10);
+    const daysToInvoice = leadDate ? Math.round((parseDateOnly(firstInv.invDate) - parseDateOnly(leadDate)) / 86400000) : null;
+    const campId = campaignKey(lead);
+    return {
+      lead,
+      name: lead.contact_name || '',
+      sourceMedium: `${lead.lead_source||'(not set)'} / ${lead.lead_medium||'(not set)'}`,
+      campaign: campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
+      keyword: rawKeywordKey(lead) || '',
+      leadDate,
+      daysToInvoice,
+      revenue: Number(latestInv.inv.details.inv_total) || 0
+    };
+  }).sort((a,b) => new Date(b.leadDate) - new Date(a.leadDate));
+  lastRenderedInvoiceLeads = invoiceLeadRows;
+
   lastSummaryData = {
     leads, curr, prev, dateFrom, dateTo, priorFrom, priorTo,
     tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp,
@@ -1905,6 +2020,7 @@ function renderAnalysis() {
       ${tabBtn(3,'Pages')}
       ${tabBtn(4,'Leads')}
       ${tabBtn(5,'Attendance')}
+      ${tabBtn(6,'Invoices')}
     </div>
 
     <div class="tab-panel" style="${tabDisplay(1)}">
@@ -2002,6 +2118,18 @@ function renderAnalysis() {
       <div class="section"><div class="section-hd"><span>Attendance by Campaign</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendCampaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendCampaignRows, attendCols('Campaign','campaign'), {rowClick:'showAttendCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'attendCampaign', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Keyword Theme</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendThemeRows, attendCols('Theme','theme'), {rowClick:'showAttendThemeLeads', tableId:'attendTheme', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Raw Keyword</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendRawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendRawKwRows, attendCols('Keyword','keyword'), {rowClick:'showAttendKeywordLeads', tableId:'attendRawKw', paginate:true})}</div></div>
+    </div>
+
+    <div class="tab-panel" style="${tabDisplay(6)}">
+      <div class="section"><div class="section-hd"><span>Leads → Invoices</span><span class="note">Pabau invoices for ${dateFrom} to ${dateTo}, matched to leads &bull; Days to Invoice is to each lead's first invoice in this range &bull; Revenue is their latest invoice in this range &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('invoiceLeads')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invoiceLeadRows, [
+        {label:'Name', key:'name'},
+        {label:'Source / Medium', key:'sourceMedium'},
+        {label:'Campaign', key:'campaign'},
+        {label:'Keyword', key:'keyword'},
+        {label:'Lead Date', key:'leadDate'},
+        {label:'Days to Invoice', key:'daysToInvoice', num:true},
+        {label:'Revenue', key:'revenue', num:true, currency:true}
+      ], {rowClick:'showInvoiceLead', rowKeyFn:r=>r.lead.lead_id, tableId:'invoiceLeads', paginate:true})}</div></div>
     </div>
   `;
 }
