@@ -949,6 +949,52 @@ function attendCols(label, key) {
   ];
 }
 
+// Maps this dashboard's attendance classification onto the WhatConverts
+// account's existing "Attended" custom field (values: Y / N / Future), for
+// bulk-updating leads via WhatConverts' own Lead Import Tool. "unknown"
+// outcomes are deliberately left out rather than guessed into one of the
+// three values.
+function wcAttendedValue(outcome) {
+  if (outcome === 'attended') return 'Y';
+  if (outcome === 'no_show' || outcome === 'cancelled') return 'N';
+  if (outcome === 'upcoming') return 'Future';
+  return null;
+}
+
+// A lead can have more than one matched appointment in the same range --
+// prefer whichever outcome is most informative (an attended visit outranks
+// a no-show/cancellation, which outranks a still-upcoming booking) rather
+// than letting array order decide which value wins.
+const OUTCOME_EXPORT_PRIORITY = {attended:3, no_show:2, cancelled:2, upcoming:1};
+
+function downloadWcAttendanceUpdateCsv() {
+  const byLead = {};
+  lastRenderedAttendance.forEach(r => {
+    if (!r.lead || !r.lead.lead_id) return;
+    const value = wcAttendedValue(r.outcome);
+    if (!value) return;
+    const priority = OUTCOME_EXPORT_PRIORITY[r.outcome] || 0;
+    const existing = byLead[r.lead.lead_id];
+    if (!existing || priority > existing.priority) {
+      byLead[r.lead.lead_id] = {value, priority};
+    }
+  });
+  const leadIds = Object.keys(byLead);
+  if (!leadIds.length) {
+    setStatus('No matched attendance rows to export yet — open the Attendance tab first.', 'err');
+    return;
+  }
+  const rows = leadIds.map(id => [id, byLead[id].value]);
+  const csv = [['Lead ID','Attended'], ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `wc-attendance-update-${currentDateFrom}-to-${currentDateTo}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function setStatus(msg, type) {
   const el = document.getElementById('status');
   el.className = 'statusbar ' + (type||'');
@@ -1937,6 +1983,7 @@ function renderAnalysis() {
         <div class="section-hd">
           <span>Attendance Overview</span>
           <span class="note">Ask Medispa appointments in Pabau, matched to leads for ${dateFrom} to ${dateTo}</span>
+          <button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadWcAttendanceUpdateCsv()">Export for WC Update</button>
         </div>
         <div class="section-bd"><div class="kpi-grid">
           <div class="kpi"><div class="kpi-val">${attendTotalAppts}</div><div class="kpi-label">Clinic Appointments</div></div>
