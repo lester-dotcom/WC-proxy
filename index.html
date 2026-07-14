@@ -1993,6 +1993,7 @@ function renderAnalysis() {
       keyword: rawKeywordKey(lead) || '',
       leadDate,
       daysToInvoice,
+      invoiceDate: latestInv.invDate,
       revenue: Number(latestInv.inv.details.inv_total) || 0
     };
   }).sort((a,b) => new Date(b.leadDate) - new Date(a.leadDate));
@@ -2137,6 +2138,7 @@ function renderAnalysis() {
         {label:'Keyword', key:'keyword'},
         {label:'Lead Date', key:'leadDate'},
         {label:'Days to Invoice', key:'daysToInvoice', num:true},
+        {label:'Invoice Date', key:'invoiceDate'},
         {label:'Revenue', key:'revenue', num:true, currency:true}
       ], {rowClick:'showInvoiceLead', rowKeyFn:r=>r.lead.lead_id, tableId:'invoiceLeads', paginate:true})}</div></div>
     </div>
