@@ -1300,35 +1300,67 @@ function timeOfDayCols(label, key) {
   ];
 }
 
-// Leads (bar height relative to the busiest hour) vs Booking Rate (bar
-// height = literal 0-100%) per hour of day. Reuses the same bar-grp/bar
-// markup as the main lead-activity chart, just with two independently
-// scaled series instead of two counts.
-function renderHourChart(hourlyStatsAll) {
-  const maxLeads = Math.max(1, ...Array.from({length:24},(_,h)=>(hourlyStatsAll[hourLabel(h)]||{curr:0}).curr));
-  const bars = Array.from({length:24}, (_,h) => {
-    const s = hourlyStatsAll[hourLabel(h)] || {curr:0,qCurr:0};
-    const rate = s.curr ? Math.round(s.qCurr/s.curr*100) : 0;
-    const tH = Math.round(s.curr/maxLeads*100);
-    return `<div class="bar-grp wide" title="${hourLabel(h)} — ${s.curr} lead${s.curr===1?'':'s'}, ${rate}% booking rate">
+// Shared Y-axis + gridlines + bar rendering, used by every chart below plus
+// the Invoices chart, so they show the same labeled numeric scale as the
+// main Lead Activity chart instead of bars with no axis reference. A second,
+// already-0-100 series (e.g. a rate) can be layered on via secondValueFor --
+// it's plotted directly in px against the fixed 100px-tall bar track, not
+// against the primary axis scale, matching how the main chart's own
+// secondary "Quotable Yes" series already shares axis space.
+function renderAxisBars(keys, valueFor, opts) {
+  const rawMax = Math.max(...keys.map(valueFor), 1);
+  const step = niceStep(rawMax);
+  const niceMax = Math.max(Math.ceil(rawMax/step)*step, step);
+  const gridlineCount = Math.round(niceMax/step);
+  const gridVals = Array.from({length: gridlineCount+1}, (_,i) => i*step);
+  const fmtAxisVal = opts.fmtAxisVal || (v => v);
+
+  const bars = keys.map(k => {
+    const v = valueFor(k);
+    const secondBar = opts.secondValueFor
+      ? `<div class="bar q" style="height:${Math.round(opts.secondValueFor(k))}px"></div>`
+      : '';
+    return `<div class="bar-grp${opts.wide?' wide':''}" title="${opts.titleFor(k)}">
       <div class="bars">
-        <div class="bar t" style="height:${tH}px"></div>
-        <div class="bar q" style="height:${rate}px"></div>
+        <div class="bar t" style="height:${Math.round(v/niceMax*90)}px"></div>
+        ${secondBar}
       </div>
-      <div class="bar-lbl">${hourLabel(h)}</div>
+      <div class="bar-lbl">${opts.xLabelFor(k)}</div>
     </div>`;
   }).join('');
-  return `<div class="legend">
-      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Leads (height relative to busiest hour)</div>
-      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Booking Rate (height = % of leads booked)</div>
-    </div>
-    <div class="chart-row"><div class="chart-scroll"><div class="chart-inner">${bars}</div></div></div>`;
+
+  const axisHtml = gridVals.map(g => `<div class="chart-axis-label" style="bottom:${Math.round(g/niceMax*90)}px">${fmtAxisVal(g)}</div>`).join('');
+  const gridlineHtml = gridVals.map(g => `<div class="chart-gridline" style="bottom:${Math.round(g/niceMax*90)}px"></div>`).join('');
+
+  return `<div class="chart-row">
+      <div class="chart-axis">${axisHtml}</div>
+      <div class="chart-scroll"><div class="chart-plot">
+        <div class="chart-gridlines">${gridlineHtml}</div>
+        <div class="chart-inner">${bars}</div>
+      </div></div>
+    </div>`;
 }
 
-// Settled appointment count (bar height relative to the busiest clinic day)
-// vs Attendance Rate (bar height = literal 0-100%) per clinic date. Reuses
-// the same bar-grp/bar markup as the hourly Time of Day chart above, just
-// keyed by appointment date instead of hour of day.
+// Leads vs Booking Rate per hour of day.
+function renderHourChart(hourlyStatsAll) {
+  const hours = Array.from({length:24}, (_,h) => h);
+  const statFor = h => hourlyStatsAll[hourLabel(h)] || {curr:0,qCurr:0};
+  const rateFor = h => { const s = statFor(h); return s.curr ? Math.round(s.qCurr/s.curr*100) : 0; };
+  const bars = renderAxisBars(hours, h => statFor(h).curr, {
+    wide: true,
+    xLabelFor: h => hourLabel(h),
+    fmtAxisVal: v => String(v),
+    secondValueFor: rateFor,
+    titleFor: h => `${hourLabel(h)} — ${statFor(h).curr} lead${statFor(h).curr===1?'':'s'}, ${rateFor(h)}% booking rate`
+  });
+  return `<div class="legend">
+      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Leads</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Booking Rate (0–100%, not to the left-axis scale)</div>
+    </div>
+    ${bars}`;
+}
+
+// Settled appointment count vs Attendance Rate per clinic date.
 function renderAttendanceChart(rows) {
   const byDate = {};
   rows.forEach(r => {
@@ -1340,28 +1372,22 @@ function renderAttendanceChart(rows) {
   });
   const dates = Object.keys(byDate).sort();
   if (!dates.length) return '<div class="empty">No settled (attended/no-show/cancelled) appointments matched in this range yet.</div>';
-  const maxSettled = Math.max(1, ...dates.map(d => {
-    const b = byDate[d];
-    return b.attended + b.noShow + b.cancelled;
-  }));
-  const bars = dates.map(d => {
-    const b = byDate[d];
-    const settled = b.attended + b.noShow + b.cancelled;
-    const rate = settled ? Math.round(b.attended/settled*100) : 0;
-    const tH = Math.round(settled/maxSettled*100);
-    return `<div class="bar-grp" title="${d} — ${settled} settled appointment${settled===1?'':'s'}, ${rate}% attendance rate (${b.attended} attended, ${b.noShow} no-show, ${b.cancelled} cancelled)">
-      <div class="bars">
-        <div class="bar t" style="height:${tH}px"></div>
-        <div class="bar q" style="height:${rate}px"></div>
-      </div>
-      <div class="bar-lbl">${d.slice(5)}</div>
-    </div>`;
-  }).join('');
+  const settledFor = d => { const b = byDate[d]; return b.attended + b.noShow + b.cancelled; };
+  const rateFor = d => { const s = settledFor(d); return s ? Math.round(byDate[d].attended/s*100) : 0; };
+  const bars = renderAxisBars(dates, settledFor, {
+    xLabelFor: d => d.slice(5),
+    fmtAxisVal: v => String(v),
+    secondValueFor: rateFor,
+    titleFor: d => {
+      const b = byDate[d], s = settledFor(d);
+      return `${d} — ${s} settled appointment${s===1?'':'s'}, ${rateFor(d)}% attendance rate (${b.attended} attended, ${b.noShow} no-show, ${b.cancelled} cancelled)`;
+    }
+  });
   return `<div class="legend">
-      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Settled Appointments (height relative to busiest day)</div>
-      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Attendance Rate (height = % attended)</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Settled Appointments</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Attendance Rate (0–100%, not to the left-axis scale)</div>
     </div>
-    <div class="chart-row"><div class="chart-scroll"><div class="chart-inner">${bars}</div></div></div>`;
+    ${bars}`;
 }
 
 function pill(text, cls) { return `<span class="pill ${cls}">${text}</span>`; }
@@ -1528,6 +1554,58 @@ function chartMetricSelectHtml() {
     <select onchange="setChartGranularity(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${granOpts}</select>
     <select onchange="setChartMetric(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${metricOpts}</select>
   </span>`;
+}
+
+let invoiceChartMetric = 'count';
+let invoiceChartGranularity = 'day';
+const INVOICE_CHART_METRICS = {
+  count:   { label: 'Invoices Issued' },
+  revenue: { label: 'Revenue' }
+};
+function setInvoiceChartMetric(v) { invoiceChartMetric = v; renderAnalysis(); }
+function setInvoiceChartGranularity(v) { invoiceChartGranularity = v; renderAnalysis(); }
+function invoiceChartSelectHtml() {
+  const metricOpts = Object.keys(INVOICE_CHART_METRICS).map(k =>
+    `<option value="${k}"${k===invoiceChartMetric?' selected':''}>${INVOICE_CHART_METRICS[k].label}</option>`).join('');
+  const granOpts = Object.keys(CHART_GRANULARITIES).map(k =>
+    `<option value="${k}"${k===invoiceChartGranularity?' selected':''}>${CHART_GRANULARITIES[k]}</option>`).join('');
+  return `<span style="display:flex;gap:6px">
+    <select onchange="setInvoiceChartGranularity(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${granOpts}</select>
+    <select onchange="setInvoiceChartMetric(this.value)" style="font-size:11px;padding:4px 8px;border-radius:4px;border:none;">${metricOpts}</select>
+  </span>`;
+}
+
+// Every fetched Pabau invoice in range (not just ones matched to a WC lead) --
+// an operational view of clinic invoicing day-to-day, independent of
+// marketing attribution, unlike the rest of the Invoices tab.
+function renderInvoiceChart(invoices, metric, granularity) {
+  const bd = {};
+  invoices.forEach(inv => {
+    const d = parsePabauDateOnly((inv.details||{}).invoice_date);
+    if (!d) return;
+    const k = bucketKey(d, granularity);
+    if (!bd[k]) bd[k] = {count:0, revenue:0};
+    bd[k].count++;
+    bd[k].revenue += Number(inv.details.inv_total) || 0;
+  });
+  const buckets = Object.keys(bd).sort();
+  if (!buckets.length) return '<div class="empty">No invoices loaded for this range yet.</div>';
+  const label = INVOICE_CHART_METRICS[metric].label;
+  const valueFor = k => metric==='revenue' ? bd[k].revenue : bd[k].count;
+  const fmtVal = v => metric==='revenue' ? fmtCurrency(v) : v;
+  const fmtAxisVal = v => metric==='revenue'
+    ? (v>=1000 ? CURRENCY_SYMBOL+(v/1000)+'k' : CURRENCY_SYMBOL+v)
+    : (v>=1000 ? (v/1000)+'k' : String(v));
+
+  const bars = renderAxisBars(buckets, valueFor, {
+    xLabelFor: k => bucketLabel(k, granularity),
+    fmtAxisVal,
+    titleFor: k => `${bucketLabel(k,granularity)}: ${fmtVal(valueFor(k))} ${label} (${bd[k].count} invoice${bd[k].count===1?'':'s'}, ${fmtCurrency(bd[k].revenue)} total)`
+  });
+  return `<div class="legend">
+      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>${label}</div>
+    </div>
+    ${bars}`;
 }
 
 // Groups a date into a day/week/month bucket. Weeks start Monday; the bucket
@@ -2172,6 +2250,7 @@ function renderAnalysis() {
     </div>
 
     <div class="tab-panel" style="${tabDisplay(6)}">
+      <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[invoiceChartGranularity]} ${INVOICE_CHART_METRICS[invoiceChartMetric].label}</span>${invoiceChartSelectHtml()}</div><div class="section-bd">${renderInvoiceChart(currentPabauInvoices, invoiceChartMetric, invoiceChartGranularity)}</div></div>
       <div class="section"><div class="section-hd"><span>Leads → Invoices</span><span class="note">Pabau invoices for ${dateFrom} to ${dateTo}, matched to leads &bull; Days to Invoice is to each lead's first invoice in this range &bull; Revenue is their latest invoice in this range &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('invoiceLeads')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invoiceLeadRows, [
         {label:'Name (WC)', key:'name'},
         {label:'Name (Pabau)', key:'pabauName'},
