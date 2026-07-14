@@ -5,12 +5,22 @@ with CORS headers, so the Lead Analyser HTML tool can call it from a browser.
 
 ## Environment variables (set in Railway)
 
-| Variable       | Description                    |
-|----------------|--------------------------------|
-| WC_TOKEN       | WhatConverts API token         |
-| WC_SECRET      | WhatConverts API secret        |
-| PABAU_API_KEY  | Pabau API key                  |
-| PORT           | Set automatically by Railway   |
+| Variable        | Description                                          |
+|-----------------|-------------------------------------------------------|
+| WC_TOKEN        | WhatConverts API token                                |
+| WC_SECRET       | WhatConverts API secret                                |
+| PABAU_API_KEY   | Pabau API key                                          |
+| DASHBOARD_TOKEN | Shared access code required on every /wc and /pabau request -- pick a long, random string, not a short PIN, since there's no rate-limiting on wrong attempts |
+| PORT            | Set automatically by Railway                           |
+
+## Auth
+
+Every request to /wc/* and /pabau/* must include an `X-Dashboard-Token` header
+matching DASHBOARD_TOKEN, or it's rejected with 401. This is what actually
+protects the patient/lead data behind this proxy -- both routes serve real
+PII, and without this the proxy would be fully open to anyone who finds the
+URL (this repo is public). The health check at / is not gated, since it
+returns no data.
 
 ## Endpoints
 
@@ -34,6 +44,6 @@ to or visible from the static dashboard.
 
 1. Push this folder to a GitHub repo (e.g. lester-dotcom/wc-proxy)
 2. Create a new Railway service pointing at that repo
-3. Add WC_TOKEN, WC_SECRET, and PABAU_API_KEY as environment variables in Railway
+3. Add WC_TOKEN, WC_SECRET, PABAU_API_KEY, and DASHBOARD_TOKEN as environment variables in Railway
 4. Railway auto-detects Node and runs `npm start`
 5. Copy the generated Railway URL into the Lead Analyser HTML (PROXY_BASE constant)

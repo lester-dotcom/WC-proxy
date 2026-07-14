@@ -87,9 +87,27 @@
   .tab-btn:hover { background: #f8fafc; }
   .tab-btn.active { background: #4c565c; color: #fff; }
   .tab-panel { display: flex; flex-direction: column; gap: 18px; }
+  .lock-screen { position: fixed; inset: 0; background: #4c565c; display: flex; align-items: center; justify-content: center; z-index: 1000; }
+  .lock-box { background: #fff; border-radius: 10px; padding: 32px; width: 320px; text-align: center; }
+  .lock-box h2 { font-size: 15px; margin-bottom: 6px; }
+  .lock-box p { font-size: 11px; color: #718096; margin-bottom: 16px; }
+  .lock-box input { width: 100%; margin-bottom: 10px; }
+  .lock-box .btn { width: 100%; }
+  .lock-err { font-size: 11px; color: #c53030; margin-top: 10px; min-height: 14px; }
 </style>
 </head>
 <body>
+
+<div class="lock-screen" id="lockScreen">
+  <div class="lock-box">
+    <h2>Access Code Required</h2>
+    <p>This dashboard contains client lead and patient data.</p>
+    <input type="password" id="lockInput" placeholder="Enter access code" onkeydown="if(event.key==='Enter') unlockDashboard()">
+    <button class="btn btn-lime" onclick="unlockDashboard()">Unlock</button>
+    <div class="lock-err" id="lockErr"></div>
+  </div>
+</div>
+
 <div class="app">
 
   <div class="header">
@@ -172,9 +190,28 @@ const d42 = new Date(); d42.setDate(today.getDate() - 42);
 document.getElementById('dateTo').value   = fmtLocalDate(today);
 document.getElementById('dateFrom').value = fmtLocalDate(d42);
 
-// The proxy URL is pre-filled and this account has a single profile,
-// so load it automatically instead of waiting for a manual click.
-if (proxyBase()) { loadProfiles(); }
+// Gate on the shared access code before doing anything else -- the proxy
+// itself enforces this via the X-Dashboard-Token header (see apiFetch/
+// pabauFetch below), this is just the UI side of it. Held in sessionStorage
+// (not localStorage) so it's forgotten when the tab/browser closes rather
+// than cached indefinitely on whatever device it was entered on.
+function unlockDashboard() {
+  const val = document.getElementById('lockInput').value.trim();
+  if (!val) return;
+  sessionStorage.setItem('dashboardToken', val);
+  document.getElementById('lockErr').textContent = '';
+  document.getElementById('lockScreen').style.display = 'none';
+  if (proxyBase()) loadProfiles();
+}
+
+if (sessionStorage.getItem('dashboardToken')) {
+  document.getElementById('lockScreen').style.display = 'none';
+  // The proxy URL is pre-filled and this account has a single profile,
+  // so load it automatically instead of waiting for a manual click.
+  if (proxyBase()) { loadProfiles(); }
+} else {
+  document.getElementById('lockInput').focus();
+}
 
 function applyQuickRange(preset) {
   if (!preset) return;
@@ -1059,11 +1096,29 @@ function proxyBase() {
   return document.getElementById('proxyBase').value.replace(/\/$/, '');
 }
 
-async function apiFetch(path) {
-  const url = proxyBase() + '/wc' + path;
-  const r = await fetch(url);
+// Shared by apiFetch/pabauFetch below -- both proxy routes require the same
+// X-Dashboard-Token header. A 403 (specifically not 401 -- see checkAuth()
+// in index.js for why) means the stored code is wrong or has been rotated
+// server-side, so it's cleared and the lock screen re-shown with an error
+// rather than surfacing a generic fetch error in the status bar. A 401 means
+// something else (e.g. WC_TOKEN/PABAU_API_KEY itself has gone stale
+// upstream), which is a real error to surface normally, not a wrong code.
+async function authFetch(url) {
+  const r = await fetch(url, { headers: { 'X-Dashboard-Token': sessionStorage.getItem('dashboardToken') || '' } });
+  if (r.status === 403) {
+    sessionStorage.removeItem('dashboardToken');
+    document.getElementById('lockErr').textContent = 'Incorrect code — please try again.';
+    document.getElementById('lockInput').value = '';
+    document.getElementById('lockScreen').style.display = 'flex';
+    document.getElementById('lockInput').focus();
+    throw new Error('Unauthorized');
+  }
   if (!r.ok) { const t = await r.text(); throw new Error(`${r.status}: ${t.slice(0,200)}`); }
   return r.json();
+}
+
+async function apiFetch(path) {
+  return authFetch(proxyBase() + '/wc' + path);
 }
 
 async function loadProfiles() {
@@ -1111,10 +1166,7 @@ async function fetchAllLeads(profileId, dateFrom, dateTo) {
 }
 
 async function pabauFetch(path) {
-  const url = proxyBase() + '/pabau' + path;
-  const r = await fetch(url);
-  if (!r.ok) { const t = await r.text(); throw new Error(`${r.status}: ${t.slice(0,200)}`); }
-  return r.json();
+  return authFetch(proxyBase() + '/pabau' + path);
 }
 
 // Pabau silently caps per_page at 50 regardless of what's requested (confirmed

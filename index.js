@@ -1,5 +1,6 @@
 const express = require('express');
 const https   = require('https');
+const crypto  = require('crypto');
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
@@ -7,11 +8,12 @@ const PORT = process.env.PORT || 8080;
 const WC_TOKEN  = process.env.WC_TOKEN;
 const WC_SECRET = process.env.WC_SECRET;
 const PABAU_API_KEY = process.env.PABAU_API_KEY;
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN;
 
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Dashboard-Token');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -19,6 +21,27 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'WhatConverts Proxy', timestamp: new Date().toISOString() });
 });
+
+// Both upstream routes below serve real patient/lead PII, so every request
+// must carry the shared dashboard access code -- this is what actually
+// protects that data, since the frontend's own PIN prompt is just a UX
+// layer in front of it and enforces nothing on its own. Constant-time
+// comparison to avoid leaking the token length/contents via response timing.
+//
+// Deliberately answers with 403, not 401: proxyGet() below relays whatever
+// status code the upstream WC/Pabau API itself returns, and WhatConverts
+// returns a real 401 for its own bad-credentials case -- if this used 401
+// too, the frontend couldn't tell "wrong dashboard code" apart from "WC_TOKEN
+// has gone stale" and would incorrectly boot the user back to the lock
+// screen for an unrelated upstream problem.
+function checkAuth(req, res) {
+  const provided = req.get('X-Dashboard-Token') || '';
+  const expected = DASHBOARD_TOKEN || '';
+  const ok = expected.length > 0 && provided.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  if (!ok) { res.status(403).json({ error: 'Forbidden' }); return false; }
+  return true;
+}
 
 // Forwards a GET to an upstream host and relays its JSON response, so
 // per-service route handlers only need to build the target path/headers.
@@ -46,6 +69,7 @@ function proxyGet(hostname, path, headers, res) {
 }
 
 app.get('/wc/*', (req, res) => {
+  if (!checkAuth(req, res)) return;
   if (!WC_TOKEN || !WC_SECRET) {
     return res.status(500).json({ error: 'WC_TOKEN and WC_SECRET not set' });
   }
@@ -63,6 +87,7 @@ app.get('/wc/*', (req, res) => {
 // so the key has to be spliced server-side here to keep it out of the
 // static dashboard entirely.
 app.get('/pabau/*', (req, res) => {
+  if (!checkAuth(req, res)) return;
   if (!PABAU_API_KEY) {
     return res.status(500).json({ error: 'PABAU_API_KEY not set' });
   }
