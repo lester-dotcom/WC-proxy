@@ -1947,6 +1947,7 @@ function renderAnalysis() {
           <div class="kpi"><div class="kpi-val">${attendCancelled}</div><div class="kpi-label">Cancelled</div></div>
         </div>
         <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:10px">Matching is by email, then phone, then name against leads already loaded for this period — a lead whose Pabau appointment falls outside the loaded window won't match. "Attendance Rate" excludes upcoming/unrecognised appointment statuses from its denominator; open the browser console after loading this tab to see which raw status strings this account uses if the split looks off.</div>
+        <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:4px">Attendance is read from Pabau's appointment stage (e.g. "Not Show") only — Pabau's separate "No Show" toggle button in its appointment card isn't exposed by this API, so if a booking is only marked via that toggle without also moving its stage, this dashboard won't see it.</div>
         </div>
       </div>
       <div class="section"><div class="section-hd"><span>Clinic Dates — Attended vs Non-Attended</span></div><div class="section-bd">${renderAttendanceChart(matchedAttendance)}</div></div>
