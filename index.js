@@ -28,16 +28,28 @@ app.get('/', (req, res) => {
 // layer in front of it and enforces nothing on its own. Constant-time
 // comparison to avoid leaking the token length/contents via response timing.
 //
-// Deliberately answers with 403, not 401: proxyGet() below relays whatever
-// status code the upstream WC/Pabau API itself returns, and WhatConverts
-// returns a real 401 for its own bad-credentials case -- if this used 401
-// too, the frontend couldn't tell "wrong dashboard code" apart from "WC_TOKEN
-// has gone stale" and would incorrectly boot the user back to the lock
-// screen for an unrelated upstream problem.
+// Deliberately answers a bad/missing token with 403, not 401: proxyGet()
+// below relays whatever status code the upstream WC/Pabau API itself
+// returns, and WhatConverts returns a real 401 for its own bad-credentials
+// case -- if this used 401 too, the frontend couldn't tell "wrong dashboard
+// code" apart from "WC_TOKEN has gone stale" and would incorrectly boot the
+// user back to the lock screen for an unrelated upstream problem.
+//
+// Server misconfiguration (DASHBOARD_TOKEN not set/picked up yet -- e.g. the
+// running process hasn't restarted since the variable was added in Railway)
+// is answered separately with 500, matching how WC_TOKEN/PABAU_API_KEY are
+// already handled below -- otherwise every code, even a correct one, would
+// fail identically to a wrong one with no way to tell the two apart.
+// .trim() guards against a trailing newline/space from copying the value out
+// of Railway's UI.
 function checkAuth(req, res) {
-  const provided = req.get('X-Dashboard-Token') || '';
-  const expected = DASHBOARD_TOKEN || '';
-  const ok = expected.length > 0 && provided.length === expected.length &&
+  const expected = (DASHBOARD_TOKEN || '').trim();
+  if (!expected) {
+    res.status(500).json({ error: 'DASHBOARD_TOKEN not set' });
+    return false;
+  }
+  const provided = (req.get('X-Dashboard-Token') || '').trim();
+  const ok = provided.length === expected.length &&
     crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
   if (!ok) { res.status(403).json({ error: 'Forbidden' }); return false; }
   return true;
