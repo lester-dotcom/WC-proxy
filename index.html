@@ -223,6 +223,13 @@ let currentDateTo = '';
 let chartMetric = 'total';
 let chartGranularity = 'day';
 
+// Pabau appointments are fetched lazily (only once the Attendance tab is
+// first opened, see setMainTab) rather than alongside every WC lead fetch,
+// since Pabau has its own rate limits and most sessions never open that tab.
+let currentPabauAppointments = [];
+let pabauFetchedFrom = '';
+let pabauFetchedTo = '';
+
 function parseCsv(text) {
   const rows = [];
   let row = [], field = '', inQuotes = false;
@@ -319,6 +326,10 @@ function showCampaignLeads(encodedKey, encodedLabel) {
 // what's on screen.
 let lastRenderedLeads = [];
 let lastSummaryData = null;
+// One entry per Pabau appointment (matched or not), refreshed on every
+// render — the Attendance tab's drill-down links filter this the same way
+// lastRenderedLeads backs every other tab's drill-down links.
+let lastRenderedAttendance = [];
 
 // Per-table sort state, keyed by the tableId passed to tbl(). Persists across
 // re-renders (filter changes, chart metric switches) within the session.
@@ -333,7 +344,25 @@ const TABLE_PAGE_SIZE = 10;
 // Which top-level tab is showing. Persists across re-renders (sorting,
 // pagination, filter changes) the same way tableSortState/tablePageState do.
 let activeMainTab = 1;
-function setMainTab(n) { activeMainTab = n; renderAnalysis(); }
+// Pabau appointments are only fetched the first time the Attendance tab (5)
+// is opened for a given date range, not on every dashboard load — re-fetches
+// only if dateFrom/dateTo have changed since the last Pabau fetch.
+async function setMainTab(n) {
+  activeMainTab = n;
+  if (n === 5 && currentDateFrom && (pabauFetchedFrom !== currentDateFrom || pabauFetchedTo !== currentDateTo)) {
+    setStatus('Fetching Pabau appointments...', 'loading');
+    try {
+      currentPabauAppointments = await fetchAllAppointments(currentDateFrom, currentDateTo);
+      pabauFetchedFrom = currentDateFrom;
+      pabauFetchedTo = currentDateTo;
+      setStatus(`${currentPabauAppointments.length} Pabau appointments loaded`, 'ok');
+    } catch(e) {
+      setStatus('Error loading Pabau appointments: ' + e.message, 'err');
+      console.error(e);
+    }
+  }
+  renderAnalysis();
+}
 // Which Time of Day chunk (if any) is expanded into its hourly breakdown,
 // on the Leads by Time of Day section at the bottom of the Leads tab.
 let expandedChunk = null;
@@ -533,6 +562,30 @@ function showSourceLeads(encodedKey, encodedLabel) {
     (l.lead_medium||'(not set)').toLowerCase().trim() === mLower
   );
   openLeadsWindow(matched, decodeURIComponent(encodedLabel));
+}
+
+// Attendance drill-downs filter lastRenderedAttendance (one entry per Pabau
+// appointment) rather than lastRenderedLeads directly, then hand the matched
+// WC lead objects to the same openLeadsWindow used everywhere else.
+function showAttendSourceLeads(encodedKey, encodedLabel) {
+  const key = decodeURIComponent(encodedKey);
+  const leads = lastRenderedAttendance.filter(r => r.lead && r.smKeyVal === key).map(r => r.lead);
+  openLeadsWindow(leads, decodeURIComponent(encodedLabel));
+}
+function showAttendCampaignLeads(encodedKey, encodedLabel) {
+  const campaignId = decodeURIComponent(encodedKey);
+  const leads = lastRenderedAttendance.filter(r => r.lead && String(r.campaignId) === campaignId).map(r => r.lead);
+  openLeadsWindow(leads, decodeURIComponent(encodedLabel));
+}
+function showAttendThemeLeads(encodedKey, encodedLabel) {
+  const theme = decodeURIComponent(encodedKey);
+  const leads = lastRenderedAttendance.filter(r => r.lead && r.themeKeyVal === theme).map(r => r.lead);
+  openLeadsWindow(leads, decodeURIComponent(encodedLabel));
+}
+function showAttendKeywordLeads(encodedKey, encodedLabel) {
+  const keyword = decodeURIComponent(encodedKey);
+  const leads = lastRenderedAttendance.filter(r => r.lead && r.rawKwKeyVal === keyword).map(r => r.lead);
+  openLeadsWindow(leads, decodeURIComponent(encodedLabel));
 }
 
 // Strips query string/hash so pages are grouped by path, not by every
@@ -812,6 +865,90 @@ function statsToRow(labelKey, label, s) {
   };
 }
 
+function normEmail(e) { return (e||'').toLowerCase().trim(); }
+function normPhone(p) { return (p||'').replace(/\D/g,'').slice(-10); }
+function normName(n)  { return (n||'').toLowerCase().trim().replace(/\s+/g,' '); }
+
+// Matches a Pabau appointment's client back to a WhatConverts lead so
+// attendance can be attributed to a source/medium/campaign/keyword. Tries
+// email first (most reliable), then phone, then name (free text, least
+// reliable — last resort), per the requested priority order.
+function buildLeadMatchIndex(leads) {
+  const byEmail = {}, byPhone = {}, byName = {};
+  leads.forEach(l => {
+    const email = normEmail(l.contact_email_address||l.email_address);
+    const phone = normPhone(l.contact_phone_number||l.phone_number);
+    const name  = normName(l.contact_name);
+    if (email && !byEmail[email]) byEmail[email] = l;
+    if (phone && !byPhone[phone]) byPhone[phone] = l;
+    if (name && !byName[name]) byName[name] = l;
+  });
+  return { byEmail, byPhone, byName };
+}
+
+function matchApptToLead(appt, index) {
+  const client = (appt.client||[])[0] || {};
+  const email = normEmail(client.Email);
+  const phone = normPhone(client.Mobile);
+  const name  = normName(client.customer_name);
+  return (email && index.byEmail[email])
+      || (phone && index.byPhone[phone])
+      || (name && index.byName[name])
+      || null;
+}
+
+// Pabau's appointment_status is free text configured per clinic, not a
+// fixed enum — confirmed against live data, values seen include "Waiting",
+// "Confirmed " (trailing space), "confirmed", "1st", "2nd",
+// "emailsenttoconfirm", "Arrived", "Checked-in", "complete"/"Complete",
+// "Not Show", "Cancelled", and "Called no answer". This maps known values
+// case/whitespace-insensitively and surfaces anything unrecognised as
+// "unknown" rather than silently guessing at it.
+function classifyAttendance(appt) {
+  const status = ((appt.details||{}).appointment_status || '').toLowerCase().trim();
+  if (['complete','arrived','checked-in'].includes(status)) return 'attended';
+  if (status === 'not show') return 'no_show';
+  if (status.includes('cancel')) return 'cancelled';
+  if (['waiting','confirmed','1st','2nd','emailsenttoconfirm'].includes(status)) return 'upcoming';
+  return 'unknown';
+}
+
+// Same shape as groupStats but tallies attendance outcomes for a single
+// period — this is a point-in-time attendance report, not a recent-vs-prior
+// comparison like the rest of the dashboard.
+function groupAttendance(rows, keyFn) {
+  const stats = {};
+  const ensure = k => stats[k] || (stats[k] = {total:0, attended:0, noShow:0, cancelled:0, upcoming:0, unknown:0});
+  rows.forEach(r => {
+    const k = keyFn(r); if (k==null) return;
+    const s = ensure(k);
+    s.total++;
+    if (r.outcome==='attended') s.attended++;
+    else if (r.outcome==='no_show') s.noShow++;
+    else if (r.outcome==='cancelled') s.cancelled++;
+    else if (r.outcome==='upcoming') s.upcoming++;
+    else s.unknown++;
+  });
+  return stats;
+}
+
+function attendanceStatsToRow(labelKey, label, s) {
+  const settled = s.attended + s.noShow + s.cancelled;
+  const rate = settled ? Math.round(s.attended/settled*100) : 0;
+  return { [labelKey]: label, total: s.total, attended: s.attended, noShow: s.noShow, cancelled: s.cancelled, rate };
+}
+
+function attendCols(label, key) {
+  return [
+    {label, key},
+    {label:'Total', key:'total', num:true},
+    {label:'Attended', key:'attended', num:true},
+    {label:'No Show', key:'noShow', num:true},
+    {label:'Cancelled', key:'cancelled', num:true},
+    {label:'Attendance Rate', key:'rate', pct:true}
+  ];
+}
+
 function setStatus(msg, type) {
   const el = document.getElementById('status');
   el.className = 'statusbar ' + (type||'');
@@ -871,6 +1008,40 @@ async function fetchAllLeads(profileId, dateFrom, dateTo) {
     if (leads.length < 500) break;
     page++;
     setStatus(`Fetching... ${all.length} leads loaded`, 'loading');
+  }
+  return all;
+}
+
+async function pabauFetch(path) {
+  const url = proxyBase() + '/pabau' + path;
+  const r = await fetch(url);
+  if (!r.ok) { const t = await r.text(); throw new Error(`${r.status}: ${t.slice(0,200)}`); }
+  return r.json();
+}
+
+// Pabau silently caps per_page at 50 regardless of what's requested (confirmed
+// against live data), so that's what's asked for and checked against to
+// detect the last page. start_date/end_date do filter correctly, but
+// pagination walks backward from the most recent matching appointment, so a
+// wide date range with many appointments can take several pages to fully
+// load — this only runs once per date range (see setMainTab), not on every
+// render.
+const PABAU_PAGE_SIZE = 50;
+// Only "Ask Medispa" appointments are relevant to lead attribution — other
+// practitioners' bookings are direct/returning-client work that was never a
+// WhatConverts lead in the first place, so including them would only dilute
+// the match rate and attendance numbers with appointments this report has
+// no way to attribute to a marketing source anyway.
+const ASK_PRACTITIONER_ID = 53116;
+async function fetchAllAppointments(dateFrom, dateTo) {
+  let page = 1, all = [];
+  while (true) {
+    const data = await pabauFetch(`/appointments?start_date=${dateFrom}&end_date=${dateTo}&per_page=${PABAU_PAGE_SIZE}&page=${page}&user_id=${ASK_PRACTITIONER_ID}`);
+    const appts = data.appointments || [];
+    all = all.concat(appts);
+    if (appts.length < PABAU_PAGE_SIZE) break;
+    page++;
+    setStatus(`Fetching... ${all.length} appointments loaded`, 'loading');
   }
   return all;
 }
@@ -1013,6 +1184,45 @@ function renderHourChart(hourlyStatsAll) {
   return `<div class="legend">
       <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Leads (height relative to busiest hour)</div>
       <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Booking Rate (height = % of leads booked)</div>
+    </div>
+    <div class="chart-row"><div class="chart-scroll"><div class="chart-inner">${bars}</div></div></div>`;
+}
+
+// Settled appointment count (bar height relative to the busiest clinic day)
+// vs Attendance Rate (bar height = literal 0-100%) per clinic date. Reuses
+// the same bar-grp/bar markup as the hourly Time of Day chart above, just
+// keyed by appointment date instead of hour of day.
+function renderAttendanceChart(rows) {
+  const byDate = {};
+  rows.forEach(r => {
+    if (!r.apptDate) return;
+    if (!byDate[r.apptDate]) byDate[r.apptDate] = {attended:0, noShow:0, cancelled:0};
+    if (r.outcome==='attended') byDate[r.apptDate].attended++;
+    else if (r.outcome==='no_show') byDate[r.apptDate].noShow++;
+    else if (r.outcome==='cancelled') byDate[r.apptDate].cancelled++;
+  });
+  const dates = Object.keys(byDate).sort();
+  if (!dates.length) return '<div class="empty">No settled (attended/no-show/cancelled) appointments matched in this range yet.</div>';
+  const maxSettled = Math.max(1, ...dates.map(d => {
+    const b = byDate[d];
+    return b.attended + b.noShow + b.cancelled;
+  }));
+  const bars = dates.map(d => {
+    const b = byDate[d];
+    const settled = b.attended + b.noShow + b.cancelled;
+    const rate = settled ? Math.round(b.attended/settled*100) : 0;
+    const tH = Math.round(settled/maxSettled*100);
+    return `<div class="bar-grp" title="${d} — ${settled} settled appointment${settled===1?'':'s'}, ${rate}% attendance rate (${b.attended} attended, ${b.noShow} no-show, ${b.cancelled} cancelled)">
+      <div class="bars">
+        <div class="bar t" style="height:${tH}px"></div>
+        <div class="bar q" style="height:${rate}px"></div>
+      </div>
+      <div class="bar-lbl">${d.slice(5)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="legend">
+      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Settled Appointments (height relative to busiest day)</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Attendance Rate (height = % attended)</div>
     </div>
     <div class="chart-row"><div class="chart-scroll"><div class="chart-inner">${bars}</div></div></div>`;
 }
@@ -1565,6 +1775,61 @@ function renderAnalysis() {
     }
   }
 
+  // Attendance tab: matches Pabau appointments (fetched separately and
+  // lazily — see setMainTab — against currentLeads by email/phone/name),
+  // then reuses the matched WC lead's existing source/medium/campaign/
+  // keyword grouping so attendance can be attributed back to a channel the
+  // same way bookings and revenue already are.
+  const leadMatchIndex = buildLeadMatchIndex(currentLeads);
+  const attendanceRows = currentPabauAppointments.map(appt => {
+    const lead = matchApptToLead(appt, leadMatchIndex);
+    return {
+      appt, lead,
+      outcome: classifyAttendance(appt),
+      apptDate: (appt.dates||{}).start_date || '',
+      smKeyVal: lead ? smKey(lead) : null,
+      campaignId: lead ? campaignKey(lead) : null,
+      themeKeyVal: lead ? themeKey(lead) : null,
+      rawKwKeyVal: lead ? rawKeywordKey(lead) : null
+    };
+  });
+  lastRenderedAttendance = attendanceRows;
+  const matchedAttendance = attendanceRows.filter(r => r.lead);
+
+  const attendTotalAppts = attendanceRows.length;
+  const attendMatchRate = attendTotalAppts ? Math.round(matchedAttendance.length/attendTotalAppts*100) : 0;
+  const attendAttended = matchedAttendance.filter(r=>r.outcome==='attended').length;
+  const attendNoShow = matchedAttendance.filter(r=>r.outcome==='no_show').length;
+  const attendCancelled = matchedAttendance.filter(r=>r.outcome==='cancelled').length;
+  const attendSettled = attendAttended + attendNoShow + attendCancelled;
+  const attendRate = attendSettled ? Math.round(attendAttended/attendSettled*100) : 0;
+
+  const attendSourceStats = groupAttendance(matchedAttendance, r => r.smKeyVal);
+  const attendSourceRows = Object.keys(attendSourceStats).map(k => {
+    const [sLower,mLower] = k.split('|');
+    const row = attendanceStatsToRow('source', `${srcMap[sLower]} / ${medMap[mLower]}`, attendSourceStats[k]);
+    row.rawKey = k;
+    return row;
+  }).sort((a,b)=>b.total-a.total);
+
+  const attendCampaignStats = groupAttendance(matchedAttendance, r => r.campaignId);
+  const attendCampaignRows = Object.keys(attendCampaignStats).filter(id=>id).map(id => {
+    const label = campNameMap[id] || (id==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : id);
+    const row = attendanceStatsToRow('campaign', label, attendCampaignStats[id]);
+    row.campaignId = id;
+    return row;
+  }).sort((a,b)=>b.total-a.total);
+
+  const attendThemeStats = groupAttendance(matchedAttendance, r => r.themeKeyVal);
+  const attendThemeRows = Object.keys(attendThemeStats).filter(k=>k).map(k =>
+    attendanceStatsToRow('theme', k, attendThemeStats[k])
+  ).sort((a,b)=>b.total-a.total);
+
+  const attendRawKwStats = groupAttendance(matchedAttendance, r => r.rawKwKeyVal);
+  const attendRawKwRows = Object.keys(attendRawKwStats).filter(k=>k).map(k =>
+    attendanceStatsToRow('keyword', k, attendRawKwStats[k])
+  ).sort((a,b)=>b.total-a.total);
+
   lastSummaryData = {
     leads, curr, prev, dateFrom, dateTo, priorFrom, priorTo,
     tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp,
@@ -1593,6 +1858,7 @@ function renderAnalysis() {
       ${tabBtn(2,'Paid Search')}
       ${tabBtn(3,'Pages')}
       ${tabBtn(4,'Leads')}
+      ${tabBtn(5,'Attendance')}
     </div>
 
     <div class="tab-panel" style="${tabDisplay(1)}">
@@ -1664,6 +1930,30 @@ function renderAnalysis() {
       <div class="section"><div class="section-hd"><span>Leads by Time of Day</span></div><div class="section-bd">${renderHourChart(hourlyStatsAll)}</div></div>
       <div class="section"><div class="section-hd"><span>Time of Day Breakdown</span><span class="note">Click a row to see its hourly breakdown &bull; click a header to sort</span>${exportButtonsHtml('timeChunk')}</div><div class="section-bd" style="overflow-x:auto">${tbl(chunkRows, timeOfDayCols('Time of Day','chunk'), {rowClick:'toggleChunk', tableId:'timeChunk'})}</div></div>
       ${expandedHourRows ? `<div class="section"><div class="section-hd"><span>Hourly Breakdown — ${expandedChunk}</span><span class="note">Click the chunk row again to close &bull; click a header to sort</span>${exportButtonsHtml('timeHour')}</div><div class="section-bd" style="overflow-x:auto">${tbl(expandedHourRows, timeOfDayCols('Hour','hour'), {tableId:'timeHour'})}</div></div>` : ''}
+    </div>
+
+    <div class="tab-panel" style="${tabDisplay(5)}">
+      <div class="section">
+        <div class="section-hd">
+          <span>Attendance Overview</span>
+          <span class="note">Ask Medispa appointments in Pabau, matched to leads for ${dateFrom} to ${dateTo}</span>
+        </div>
+        <div class="section-bd"><div class="kpi-grid">
+          <div class="kpi"><div class="kpi-val">${attendTotalAppts}</div><div class="kpi-label">Clinic Appointments</div></div>
+          <div class="kpi ${attendMatchRate<50?'amber':''}"><div class="kpi-val">${attendMatchRate}%</div><div class="kpi-label">Matched to a Lead</div><div class="kpi-sub">${matchedAttendance.length} of ${attendTotalAppts}</div></div>
+          <div class="kpi lime"><div class="kpi-val">${attendRate}%</div><div class="kpi-label">Attendance Rate</div><div class="kpi-sub">of settled appointments</div></div>
+          <div class="kpi lime"><div class="kpi-val">${attendAttended}</div><div class="kpi-label">Attended</div></div>
+          <div class="kpi ${attendNoShow>0?'amber':''}"><div class="kpi-val">${attendNoShow}</div><div class="kpi-label">No Shows</div></div>
+          <div class="kpi"><div class="kpi-val">${attendCancelled}</div><div class="kpi-label">Cancelled</div></div>
+        </div>
+        <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:10px">Matching is by email, then phone, then name against leads already loaded for this period — a lead whose Pabau appointment falls outside the loaded window won't match. "Attendance Rate" excludes upcoming/unrecognised appointment statuses from its denominator; open the browser console after loading this tab to see which raw status strings this account uses if the split looks off.</div>
+        </div>
+      </div>
+      <div class="section"><div class="section-hd"><span>Clinic Dates — Attended vs Non-Attended</span></div><div class="section-bd">${renderAttendanceChart(matchedAttendance)}</div></div>
+      <div class="section"><div class="section-hd"><span>Attendance by Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendSource')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendSourceRows, attendCols('Source / Medium','source'), {rowClick:'showAttendSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'attendSource', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Attendance by Campaign</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendCampaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendCampaignRows, attendCols('Campaign','campaign'), {rowClick:'showAttendCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'attendCampaign', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Attendance by Keyword Theme</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendThemeRows, attendCols('Theme','theme'), {rowClick:'showAttendThemeLeads', tableId:'attendTheme', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Attendance by Raw Keyword</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendRawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendRawKwRows, attendCols('Keyword','keyword'), {rowClick:'showAttendKeywordLeads', tableId:'attendRawKw', paginate:true})}</div></div>
     </div>
   `;
 }
