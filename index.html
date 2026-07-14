@@ -1978,9 +1978,16 @@ function renderAnalysis() {
     const leadDate = (lead.date_created||lead.lead_date||'').slice(0,10);
     const daysToInvoice = leadDate ? Math.round((parseDateOnly(firstInv.invDate) - parseDateOnly(leadDate)) / 86400000) : null;
     const campId = campaignKey(lead);
+    const pabauClient = (latestInv.inv.client||[])[0] || {};
     return {
       lead,
       name: lead.contact_name || '',
+      // WC's contact_name is often just the caller-ID string for phone leads
+      // (e.g. "UNITED KINGDOM") rather than a real name -- Pabau's own
+      // client record (from the invoice) usually has the actual name/mobile,
+      // so both are shown side by side to make identifying people easier.
+      pabauName: pabauClient.client_name || '',
+      pabauMobile: pabauClient.mobile || '',
       sourceMedium: `${lead.lead_source||'(not set)'} / ${lead.lead_medium||'(not set)'}`,
       campaign: campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
       keyword: rawKeywordKey(lead) || '',
@@ -2122,7 +2129,9 @@ function renderAnalysis() {
 
     <div class="tab-panel" style="${tabDisplay(6)}">
       <div class="section"><div class="section-hd"><span>Leads → Invoices</span><span class="note">Pabau invoices for ${dateFrom} to ${dateTo}, matched to leads &bull; Days to Invoice is to each lead's first invoice in this range &bull; Revenue is their latest invoice in this range &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('invoiceLeads')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invoiceLeadRows, [
-        {label:'Name', key:'name'},
+        {label:'Name (WC)', key:'name'},
+        {label:'Name (Pabau)', key:'pabauName'},
+        {label:'Mobile (Pabau)', key:'pabauMobile'},
         {label:'Source / Medium', key:'sourceMedium'},
         {label:'Campaign', key:'campaign'},
         {label:'Keyword', key:'keyword'},
