@@ -1536,7 +1536,7 @@ function renderAnalysis() {
   }).sort((a,b)=>b.curr-a.curr);
 
   const bd={};
-  curr.forEach(l=>{
+  cpcCurr.forEach(l=>{
     const d=(l.date_created||l.lead_date||'').slice(0,10); if(!d) return;
     if(!bd[d]) bd[d]={total:0,kw:0,quot:0};
     bd[d].total++; if(l.lead_keyword) bd[d].kw++; if(l.quotable==='Yes') bd[d].quot++;
