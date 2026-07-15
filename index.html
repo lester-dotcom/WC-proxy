@@ -386,6 +386,9 @@ let lastRenderedAttendance = [];
 // One entry per lead with a matched invoice in range, refreshed on every
 // render — backs the Invoices tab's drill-down links.
 let lastRenderedInvoiceLeads = [];
+// One entry per invoice in range (matched or not), refreshed on every render
+// — backs the Invoices tab's revenue-by-channel table drill-down links.
+let lastRenderedInvoiceRevenue = [];
 // One entry per matched no-show/cancelled appointment, refreshed on every
 // render — backs the Attendance tab's Non-Attendees table drill-down links.
 let lastRenderedNonAttendees = [];
@@ -681,6 +684,29 @@ function showInvoiceLead(encodedLeadId, encodedLabel) {
   const leadId = decodeURIComponent(encodedLeadId);
   const leads = lastRenderedInvoiceLeads.filter(r => String(r.lead.lead_id) === leadId).map(r => r.lead);
   openLeadsWindow(leads, decodeURIComponent(encodedLabel));
+}
+
+// Multiple invoices in a revenue-by-channel bucket can belong to the same
+// lead -- de-duped here so the drill-down popup shows one row per person,
+// not one row per invoice.
+function uniqueLeadsFrom(rows) {
+  const seen = new Set(), result = [];
+  rows.forEach(r => {
+    if (r.lead && !seen.has(r.lead.lead_id)) { seen.add(r.lead.lead_id); result.push(r.lead); }
+  });
+  return result;
+}
+function showInvoiceRevenueSourceLeads(encodedKey, encodedLabel) {
+  const key = decodeURIComponent(encodedKey);
+  openLeadsWindow(uniqueLeadsFrom(lastRenderedInvoiceRevenue.filter(r => r.smKeyVal === key)), decodeURIComponent(encodedLabel));
+}
+function showInvoiceRevenueCampaignLeads(encodedKey, encodedLabel) {
+  const campaignId = decodeURIComponent(encodedKey);
+  openLeadsWindow(uniqueLeadsFrom(lastRenderedInvoiceRevenue.filter(r => String(r.campaignId) === campaignId)), decodeURIComponent(encodedLabel));
+}
+function showInvoiceRevenueKeywordLeads(encodedKey, encodedLabel) {
+  const keyword = decodeURIComponent(encodedKey);
+  openLeadsWindow(uniqueLeadsFrom(lastRenderedInvoiceRevenue.filter(r => r.rawKwKeyVal === keyword)), decodeURIComponent(encodedLabel));
 }
 
 // Same one-row-per-lead shape as showInvoiceLead.
@@ -1062,6 +1088,14 @@ function attendCols(label, key) {
     {label:'No Show', key:'noShow', num:true},
     {label:'Cancelled', key:'cancelled', num:true},
     {label:'Attendance Rate', key:'rate', pct:true}
+  ];
+}
+
+function invRevenueCols(label, key) {
+  return [
+    {label, key},
+    {label:'Invoices Issued', key:'count', num:true},
+    {label:'Invoice Total', key:'revenue', num:true, currency:true}
   ];
 }
 
@@ -2195,6 +2229,60 @@ function renderAnalysis() {
   }).sort((a,b) => new Date(b.leadDate) - new Date(a.leadDate));
   lastRenderedInvoiceLeads = invoiceLeadRows;
 
+  // Revenue-by-invoice-date tables: unlike invoiceLeadRows above (one row per
+  // LEAD, counting only their latest invoice), these count and sum EVERY
+  // invoice issued in range, grouped by channel -- this is "how much did the
+  // clinic actually bill this period", not "how did each lead convert".
+  // Still matched via the wide invoiceLeadMatchIndex built above, so an
+  // invoice whose lead predates the selected range is still attributed
+  // correctly rather than being dropped (see the currentAllLeads fix).
+  const invoiceRevenueRows = currentPabauInvoices.map(inv => {
+    const lead = matchInvoiceToLead(inv, invoiceLeadMatchIndex);
+    return {
+      lead,
+      invDate: parsePabauDateOnly((inv.details||{}).invoice_date),
+      revenue: Number((inv.details||{}).inv_total) || 0,
+      smKeyVal: lead ? smKey(lead) : null,
+      campaignId: lead ? campaignKey(lead) : null,
+      rawKwKeyVal: lead ? rawKeywordKey(lead) : null
+    };
+  });
+  lastRenderedInvoiceRevenue = invoiceRevenueRows;
+
+  const invTotalCount = currentPabauInvoices.length;
+  const invTotalRevenue = invoiceRevenueRows.reduce((s,r) => s + r.revenue, 0);
+  const cpcInvoiceRows = invoiceRevenueRows.filter(r => r.lead && isGoogleCpc(r.lead));
+  const cpcInvCount = cpcInvoiceRows.length;
+  const cpcInvRevenue = cpcInvoiceRows.reduce((s,r) => s + r.revenue, 0);
+
+  function invoiceRevenueGroup(rows, keyFn) {
+    const stats = {};
+    rows.forEach(r => {
+      const k = keyFn(r); if (k==null) return;
+      if (!stats[k]) stats[k] = {count:0, revenue:0};
+      stats[k].count++;
+      stats[k].revenue += r.revenue;
+    });
+    return stats;
+  }
+
+  const invSourceStats = invoiceRevenueGroup(invoiceRevenueRows, r => r.smKeyVal);
+  const invSourceRows = Object.keys(invSourceStats).map(k => {
+    const [sLower,mLower] = k.split('|');
+    return { source: `${srcMap[sLower]} / ${medMap[mLower]}`, rawKey: k, count: invSourceStats[k].count, revenue: invSourceStats[k].revenue };
+  }).sort((a,b)=>b.revenue-a.revenue);
+
+  const invCampaignStats = invoiceRevenueGroup(invoiceRevenueRows, r => r.campaignId);
+  const invCampaignRows = Object.keys(invCampaignStats).filter(id=>id).map(id => {
+    const label = campNameMap[id] || (id==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : id);
+    return { campaign: label, campaignId: id, count: invCampaignStats[id].count, revenue: invCampaignStats[id].revenue };
+  }).sort((a,b)=>b.revenue-a.revenue);
+
+  const invKeywordStats = invoiceRevenueGroup(invoiceRevenueRows, r => r.rawKwKeyVal);
+  const invKeywordRows = Object.keys(invKeywordStats).filter(k=>k).map(k => ({
+    keyword: k, count: invKeywordStats[k].count, revenue: invKeywordStats[k].revenue
+  })).sort((a,b)=>b.revenue-a.revenue);
+
   lastSummaryData = {
     leads, curr, prev, dateFrom, dateTo, priorFrom, priorTo,
     tc, tp, qc, qp, qPc, qPp, kwPc, kwPp, kc, kp, sc, sp, rc, rp,
@@ -2335,7 +2423,22 @@ function renderAnalysis() {
     </div>
 
     <div class="tab-panel" style="${tabDisplay(6)}">
+      <div class="section">
+        <div class="section-hd">
+          <span>Invoices Overview</span>
+          <span class="note">Invoices issued ${dateFrom} to ${dateTo}</span>
+        </div>
+        <div class="section-bd"><div class="kpi-grid">
+          <div class="kpi"><div class="kpi-val">${invTotalCount}</div><div class="kpi-label">Invoices Issued</div></div>
+          <div class="kpi lime"><div class="kpi-val">${fmtCurrency(invTotalRevenue)}</div><div class="kpi-label">Invoice Total</div></div>
+          <div class="kpi"><div class="kpi-val">${cpcInvCount}</div><div class="kpi-label">Invoices Issued (Google/CPC)</div></div>
+          <div class="kpi lime"><div class="kpi-val">${fmtCurrency(cpcInvRevenue)}</div><div class="kpi-label">Invoice Total (Google/CPC)</div></div>
+        </div></div>
+      </div>
       <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[invoiceChartGranularity]} ${INVOICE_CHART_METRICS[invoiceChartMetric].label}</span>${invoiceChartSelectHtml()}</div><div class="section-bd">${renderInvoiceChart(currentPabauInvoices, invoiceChartMetric, invoiceChartGranularity)}</div></div>
+      <div class="section"><div class="section-hd"><span>Revenue by Source / Medium</span><span class="note">By invoice date, not lead date &bull; click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('invoiceRevenueSource')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invSourceRows, invRevenueCols('Source / Medium','source'), {rowClick:'showInvoiceRevenueSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'invoiceRevenueSource', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Revenue by Campaign (Google/CPC)</span><span class="note">By invoice date, not lead date &bull; click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('invoiceRevenueCampaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invCampaignRows, invRevenueCols('Campaign','campaign'), {rowClick:'showInvoiceRevenueCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'invoiceRevenueCampaign', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Revenue by Keyword (Google/CPC)</span><span class="note">By invoice date, not lead date &bull; click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('invoiceRevenueKeyword')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invKeywordRows, invRevenueCols('Keyword','keyword'), {rowClick:'showInvoiceRevenueKeywordLeads', tableId:'invoiceRevenueKeyword', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Leads → Invoices</span><span class="note">Pabau invoices issued ${dateFrom} to ${dateTo}, matched against leads created up to ${INVOICE_LEAD_LOOKBACK_MONTHS} months earlier &bull; Days to Invoice is to each lead's first invoice in this range &bull; Revenue is their latest invoice in this range &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('invoiceLeads')}</div><div class="section-bd" style="overflow-x:auto">${tbl(invoiceLeadRows, [
         {label:'Name (WC)', key:'name'},
         {label:'Name (Pabau)', key:'pabauName'},
