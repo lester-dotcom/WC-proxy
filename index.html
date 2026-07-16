@@ -424,11 +424,14 @@ let activeMainTab = 1;
 // only if dateFrom/dateTo have changed since the last Pabau fetch.
 async function setMainTab(n) {
   activeMainTab = n;
-  if (n === 2) {
+  if (n === 2 || n === 3) {
+    // Shared with the Paid Search tab's Monthly Revenue Trend chart -- same
+    // fixed YTD range, same cache, fetched once regardless of which of the
+    // two tabs is opened first.
     const profileId = document.getElementById('profileSel').value;
     const { start, end } = ytdToLastMonthBounds();
     if (profileId && start <= end && ytdFetchedProfileId !== profileId) {
-      setStatus('Fetching YTD lead data for Monthly Revenue Trend...', 'loading');
+      setStatus('Fetching YTD lead data for revenue trend charts...', 'loading');
       try {
         currentYtdLeads = await fetchAllLeads(profileId, start, end);
         ytdFetchedProfileId = profileId;
@@ -1935,6 +1938,98 @@ function renderMonthlyRevenueTrend(ytdLeads, adsRows, start, end) {
     </svg>`;
 }
 
+// Same fixed-YTD-range SVG line chart approach as renderMonthlyRevenueTrend,
+// but for organic traffic -- any source with medium "organic", combined
+// into one line rather than split per source, since that's specifically
+// what was asked for here. Revenue (currency) on the left axis, Quotable
+// Leads (a plain count) on the right -- no spend/ROAS, since organic
+// traffic has no ad spend to compare against.
+function renderOrganicRevenueTrend(ytdLeads, start, end) {
+  if (start > end) return '<div class="empty">No complete months yet this year.</div>';
+  const months = enumerateMonths(start, end);
+  const bd = {};
+  months.forEach(m => bd[m] = {quotable:0, revenue:0});
+  ytdLeads.forEach(l => {
+    if ((l.lead_medium||'').toLowerCase().trim() !== 'organic') return;
+    const d = (l.date_created||l.lead_date||'').slice(0,10);
+    if (!d || d < start || d > end) return;
+    const k = bucketKey(d, 'month');
+    if (!bd[k]) return;
+    if (l.quotable === 'Yes') bd[k].quotable++;
+    if (hasSalesValue(l)) bd[k].revenue += Number(l.sales_value);
+  });
+  const rows = months.map(m => {
+    const b = bd[m];
+    return { label: bucketLabel(m, 'month'), quotable: b.quotable, revenue: b.revenue };
+  });
+
+  const W = 700, H = 240, padL = 60, padR = 60, padT = 14, padB = 26;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = rows.length;
+  const xFor = i => n===1 ? padL + plotW/2 : padL + (i/(n-1))*plotW;
+
+  const leftMax = chartNiceMax(Math.max(1, ...rows.map(r=>r.revenue)));
+  const rightMax = chartNiceMax(Math.max(1, ...rows.map(r=>r.quotable)));
+  const yForLeft = v => padT + plotH - (v/leftMax)*plotH;
+  const yForRight = v => padT + plotH - (v/rightMax)*plotH;
+
+  const gridCount = 4;
+  const gridFracs = Array.from({length: gridCount+1}, (_,i) => i/gridCount);
+  const gridHtml = gridFracs.map(f => {
+    const y = (padT + plotH - f*plotH).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="#eef1f4" stroke-width="1"/>`;
+  }).join('');
+  const leftAxisHtml = gridFracs.map(f => {
+    const y = (padT + plotH - f*plotH).toFixed(1);
+    const val = f*leftMax;
+    const txt = val>=1000 ? CURRENCY_SYMBOL+(val/1000)+'k' : CURRENCY_SYMBOL+val;
+    return `<text x="${padL-8}" y="${Number(y)+3}" text-anchor="end" font-size="9" fill="#a0aec0">${txt}</text>`;
+  }).join('');
+  const rightAxisHtml = gridFracs.map(f => {
+    const y = (padT + plotH - f*plotH).toFixed(1);
+    const val = Math.round(f*rightMax);
+    return `<text x="${W-padR+8}" y="${Number(y)+3}" text-anchor="start" font-size="9" fill="#a0aec0">${val}</text>`;
+  }).join('');
+  const xAxisHtml = rows.map((r,i) => `<text x="${xFor(i).toFixed(1)}" y="${H-6}" text-anchor="middle" font-size="9" fill="#a0aec0">${r.label}</text>`).join('');
+
+  function linePath(values, yFor) {
+    let d = '', started = false;
+    values.forEach((v,i) => {
+      if (v==null) { started = false; return; }
+      d += (started ? 'L' : 'M') + xFor(i).toFixed(1) + ',' + yFor(v).toFixed(1) + ' ';
+      started = true;
+    });
+    return d.trim();
+  }
+  function dotsHtml(values, yFor, color, fmtV) {
+    return values.map((v,i) => v==null ? '' : `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(v).toFixed(1)}" r="3.5" fill="${color}"><title>${rows[i].label}: ${fmtV(v)}</title></circle>`).join('');
+  }
+
+  const revenuePath = linePath(rows.map(r=>r.revenue), yForLeft);
+  const quotablePath = linePath(rows.map(r=>r.quotable), yForRight);
+  const revenueDots = dotsHtml(rows.map(r=>r.revenue), yForLeft, '#4c565c', v=>fmtCurrency(v)+' revenue');
+  const quotableDots = dotsHtml(rows.map(r=>r.quotable), yForRight, '#aec90b', v=>v+' quotable lead'+(v===1?'':'s'));
+
+  const leftTitleY = (padT + plotH/2).toFixed(1);
+  const rightTitleY = (padT + plotH/2).toFixed(1);
+
+  return `<div class="legend">
+      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Revenue (left axis)</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Quotable Leads (right axis)</div>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+      ${gridHtml}
+      <text x="16" y="${leftTitleY}" text-anchor="middle" font-size="9" fill="#718096" transform="rotate(-90 16 ${leftTitleY})">Revenue</text>
+      <text x="${W-16}" y="${rightTitleY}" text-anchor="middle" font-size="9" fill="#718096" transform="rotate(90 ${W-16} ${rightTitleY})">Quotable Leads</text>
+      ${leftAxisHtml}
+      ${rightAxisHtml}
+      ${xAxisHtml}
+      <path d="${revenuePath}" fill="none" stroke="#4c565c" stroke-width="2"/>
+      <path d="${quotablePath}" fill="none" stroke="#aec90b" stroke-width="2" stroke-dasharray="4,3"/>
+      ${revenueDots}${quotableDots}
+    </svg>`;
+}
+
 function renderChart(leads, metric, adsRows, granularity) {
   const bd = {};
   const ensureBucket = k => bd[k] || (bd[k] = {total:0,quot:0,kw:0,sales:0,revenue:0,spend:0});
@@ -2555,6 +2650,7 @@ function renderAnalysis() {
     </div>
 
     <div class="tab-panel" style="${tabDisplay(3)}">
+      <div class="section"><div class="section-hd"><span>Organic Revenue Trend</span><span class="note">Jan to end of last month (${ytdBounds.start} to ${ytdBounds.end}) &bull; any source with medium "organic", combined &bull; always year-to-date, independent of the date range above &bull; hover a point for its exact value</span></div><div class="section-bd">${renderOrganicRevenueTrend(currentYtdLeads, ytdBounds.start, ytdBounds.end)}</div></div>
       <div class="section"><div class="section-hd"><span>Landing Pages</span><span class="note">Click a page to view its leads &bull; click a header to sort &bull; grouped by page path (query strings stripped)</span><button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadPagesSummary()">Download Summary</button>${exportButtonsHtml('landingPages')}</div><div class="section-bd" style="overflow-x:auto">${tbl(landingRows,[{label:'Page',key:'page'},{label:'Lands',key:'lands',num:true},{label:'Booked Leads',key:'booked',num:true},{label:'Booking Rate',key:'bookingRate',pct:true},{label:'Sales',key:'sales',num:true},{label:'Sales %',key:'salesPct',pct:true},{label:'Revenue',key:'revenue',num:true,currency:true},{label:'Revenue / Land',key:'revPerLand',num:true,currency:true}], {rowClick:'showLandingPageLeads', tableId:'landingPages', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Page Value</span><span class="note">Click a page to view its leads &bull; click a header to sort</span>${exportButtonsHtml('pageValue')}</div><div class="section-bd" style="overflow-x:auto">
         <div class="proxy-note">"Page Touches" counts a page once per lead if it was that lead's landing page or conversion page. WhatConverts' API doesn't expose a full page-view/session log, so this can't capture every individual view within a visitor's journey (that would need a separate analytics source like GA4) — it's the closest available proxy, not raw traffic.</div>
