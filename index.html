@@ -1865,7 +1865,11 @@ function renderMonthlyRevenueTrend(ytdLeads, adsRows, start, end) {
     return { label: bucketLabel(m, 'month'), revenue: b.revenue, spend: b.spend, roas: b.spend ? b.revenue/b.spend : null };
   });
 
-  const W = 700, H = 240, padL = 60, padR = 60, padT = 14, padB = 26;
+  // Wider/shorter canvas than a naive square-ish chart -- at typical section
+  // widths this keeps the rendered height in the same ballpark as the bar
+  // charts elsewhere (~90px plot height), rather than stretching tall when
+  // scaled to 100% width like a 700x240 canvas would.
+  const W = 840, H = 130, padL = 60, padR = 60, padT = 10, padB = 30;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const n = rows.length;
   const xFor = i => n===1 ? padL + plotW/2 : padL + (i/(n-1))*plotW;
@@ -1963,7 +1967,11 @@ function renderOrganicRevenueTrend(ytdLeads, start, end) {
     return { label: bucketLabel(m, 'month'), quotable: b.quotable, revenue: b.revenue };
   });
 
-  const W = 700, H = 240, padL = 60, padR = 60, padT = 14, padB = 26;
+  // Wider/shorter canvas than a naive square-ish chart -- at typical section
+  // widths this keeps the rendered height in the same ballpark as the bar
+  // charts elsewhere (~90px plot height), rather than stretching tall when
+  // scaled to 100% width like a 700x240 canvas would.
+  const W = 840, H = 130, padL = 60, padR = 60, padT = 10, padB = 30;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const n = rows.length;
   const xFor = i => n===1 ? padL + plotW/2 : padL + (i/(n-1))*plotW;
