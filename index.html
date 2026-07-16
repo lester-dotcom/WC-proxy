@@ -392,6 +392,9 @@ let lastRenderedInvoiceRevenue = [];
 // One entry per matched no-show/cancelled appointment, refreshed on every
 // render — backs the Attendance tab's Non-Attendees table drill-down links.
 let lastRenderedNonAttendees = [];
+// Same, but for matched attended appointments — backs the Attendance tab's
+// Attended table drill-down links.
+let lastRenderedAttended = [];
 
 // Per-table sort state, keyed by the tableId passed to tbl(). Persists across
 // re-renders (filter changes, chart metric switches) within the session.
@@ -713,6 +716,11 @@ function showInvoiceRevenueKeywordLeads(encodedKey, encodedLabel) {
 function showNonAttendeeLead(encodedLeadId, encodedLabel) {
   const leadId = decodeURIComponent(encodedLeadId);
   const leads = lastRenderedNonAttendees.filter(r => String(r.lead.lead_id) === leadId).map(r => r.lead);
+  openLeadsWindow(leads, decodeURIComponent(encodedLabel));
+}
+function showAttendedLead(encodedLeadId, encodedLabel) {
+  const leadId = decodeURIComponent(encodedLeadId);
+  const leads = lastRenderedAttended.filter(r => String(r.lead.lead_id) === leadId).map(r => r.lead);
   openLeadsWindow(leads, decodeURIComponent(encodedLabel));
 }
 
@@ -1096,6 +1104,20 @@ function invRevenueCols(label, key) {
     {label, key},
     {label:'Invoices Issued', key:'count', num:true},
     {label:'Invoice Total', key:'revenue', num:true, currency:true}
+  ];
+}
+
+// Shared by the Attended and Non-Attendees tables — same columns either way.
+function attendanceListCols() {
+  return [
+    {label:'Name', key:'name'},
+    {label:'Phone', key:'phone'},
+    {label:'Source / Medium', key:'sourceMedium'},
+    {label:'Campaign', key:'campaign'},
+    {label:'Keyword', key:'keyword'},
+    {label:'Lead Date', key:'leadDate'},
+    {label:'Appointment Date', key:'apptDate'},
+    {label:'Outcome', key:'outcome', statusPill:true}
   ];
 }
 
@@ -2158,28 +2180,34 @@ function renderAnalysis() {
     attendanceStatsToRow('keyword', k, attendRawKwStats[k])
   ).sort((a,b)=>b.total-a.total);
 
-  // Non-Attendees table: every matched no-show/cancelled appointment, one row
-  // each, with enough context to action follow-up. Name/phone come from
-  // Pabau's own client record on the appointment (falling back to the WC
-  // lead's fields) since WC's contact_name is often just a caller-ID string
-  // for phone leads — same reasoning as the Invoices tab's Pabau columns.
-  const nonAttendeeRows = matchedAttendance.filter(r => r.outcome==='no_show' || r.outcome==='cancelled').map(r => {
-    const client = (r.appt.client||[])[0] || {};
-    const campId = r.campaignId;
-    return {
-      lead: r.lead,
-      name: client.customer_name || r.lead.contact_name || '',
-      phone: client.Mobile || r.lead.contact_phone_number || r.lead.phone_number || '',
-      leadDate: (r.lead.date_created||r.lead.lead_date||'').slice(0,10),
-      apptDate: r.apptDate,
-      sourceMedium: `${r.lead.lead_source||'(not set)'} / ${r.lead.lead_medium||'(not set)'}`,
-      campaign: campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
-      keyword: r.rawKwKeyVal || '',
-      outcome: r.outcome === 'no_show' ? 'No Show' : 'Cancelled',
-      statusCls: r.outcome === 'no_show' ? 'r' : 'a'
-    };
-  }).sort((a,b) => new Date(b.apptDate) - new Date(a.apptDate));
+  // Attended / Non-Attendees tables: every matched appointment, one row each,
+  // with enough context to action follow-up. Name/phone come from Pabau's
+  // own client record on the appointment (falling back to the WC lead's
+  // fields) since WC's contact_name is often just a caller-ID string for
+  // phone leads — same reasoning as the Invoices tab's Pabau columns. Shared
+  // row shape between both tables; only the outcome filter/label/pill differ.
+  function attendanceDisplayRows(rows) {
+    return rows.map(r => {
+      const client = (r.appt.client||[])[0] || {};
+      const campId = r.campaignId;
+      return {
+        lead: r.lead,
+        name: client.customer_name || r.lead.contact_name || '',
+        phone: client.Mobile || r.lead.contact_phone_number || r.lead.phone_number || '',
+        leadDate: (r.lead.date_created||r.lead.lead_date||'').slice(0,10),
+        apptDate: r.apptDate,
+        sourceMedium: `${r.lead.lead_source||'(not set)'} / ${r.lead.lead_medium||'(not set)'}`,
+        campaign: campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
+        keyword: r.rawKwKeyVal || '',
+        outcome: r.outcome === 'no_show' ? 'No Show' : r.outcome === 'cancelled' ? 'Cancelled' : 'Attended',
+        statusCls: r.outcome === 'no_show' ? 'r' : r.outcome === 'cancelled' ? 'a' : 'g'
+      };
+    }).sort((a,b) => new Date(b.apptDate) - new Date(a.apptDate));
+  }
+  const nonAttendeeRows = attendanceDisplayRows(matchedAttendance.filter(r => r.outcome==='no_show' || r.outcome==='cancelled'));
   lastRenderedNonAttendees = nonAttendeeRows;
+  const attendedRows = attendanceDisplayRows(matchedAttendance.filter(r => r.outcome==='attended'));
+  lastRenderedAttended = attendedRows;
 
   // Invoices tab: matches Pabau invoices (fetched separately and lazily —
   // see setMainTab) to WC leads, then builds one row per lead with at least
@@ -2410,16 +2438,8 @@ function renderAnalysis() {
       <div class="section"><div class="section-hd"><span>Attendance by Campaign</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendCampaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendCampaignRows, attendCols('Campaign','campaign'), {rowClick:'showAttendCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'attendCampaign', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Keyword Theme</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendThemeRows, attendCols('Theme','theme'), {rowClick:'showAttendThemeLeads', tableId:'attendTheme', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Raw Keyword</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendRawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendRawKwRows, attendCols('Keyword','keyword'), {rowClick:'showAttendKeywordLeads', tableId:'attendRawKw', paginate:true})}</div></div>
-      <div class="section"><div class="section-hd"><span>Non-Attendees</span><span class="note">Every matched no-show/cancelled appointment &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('nonAttendees')}</div><div class="section-bd" style="overflow-x:auto">${tbl(nonAttendeeRows, [
-        {label:'Name', key:'name'},
-        {label:'Phone', key:'phone'},
-        {label:'Source / Medium', key:'sourceMedium'},
-        {label:'Campaign', key:'campaign'},
-        {label:'Keyword', key:'keyword'},
-        {label:'Lead Date', key:'leadDate'},
-        {label:'Appointment Date', key:'apptDate'},
-        {label:'Outcome', key:'outcome', statusPill:true}
-      ], {rowClick:'showNonAttendeeLead', rowKeyFn:r=>r.lead.lead_id, tableId:'nonAttendees', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Attended</span><span class="note">Every matched attended appointment &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('attended')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendedRows, attendanceListCols(), {rowClick:'showAttendedLead', rowKeyFn:r=>r.lead.lead_id, tableId:'attended', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Non-Attendees</span><span class="note">Every matched no-show/cancelled appointment &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('nonAttendees')}</div><div class="section-bd" style="overflow-x:auto">${tbl(nonAttendeeRows, attendanceListCols(), {rowClick:'showNonAttendeeLead', rowKeyFn:r=>r.lead.lead_id, tableId:'nonAttendees', paginate:true})}</div></div>
     </div>
 
     <div class="tab-panel" style="${tabDisplay(6)}">
