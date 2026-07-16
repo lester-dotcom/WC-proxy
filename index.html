@@ -260,6 +260,16 @@ let currentDateTo = '';
 let chartMetric = 'total';
 let chartGranularity = 'day';
 
+// Leads for the Monthly Revenue Trend chart on the Paid Search tab -- always
+// January 1 of the current year through the end of the previous calendar
+// month, independent of whatever date range is selected elsewhere on the
+// dashboard. Fetched once per profile (the range itself only changes when
+// the calendar month rolls over, not worth re-fetching for). Ad spend reuses
+// currentAdsSpend directly (already the full sheet history, no new fetch
+// needed) filtered to the same fixed range.
+let currentYtdLeads = [];
+let ytdFetchedProfileId = '';
+
 // Pabau appointments are fetched lazily (only once the Attendance tab is
 // first opened, see setMainTab) rather than alongside every WC lead fetch,
 // since Pabau has its own rate limits and most sessions never open that tab.
@@ -414,6 +424,20 @@ let activeMainTab = 1;
 // only if dateFrom/dateTo have changed since the last Pabau fetch.
 async function setMainTab(n) {
   activeMainTab = n;
+  if (n === 2) {
+    const profileId = document.getElementById('profileSel').value;
+    const { start, end } = ytdToLastMonthBounds();
+    if (profileId && start <= end && ytdFetchedProfileId !== profileId) {
+      setStatus('Fetching YTD lead data for Monthly Revenue Trend...', 'loading');
+      try {
+        currentYtdLeads = await fetchAllLeads(profileId, start, end);
+        ytdFetchedProfileId = profileId;
+      } catch(e) {
+        setStatus('Error loading YTD data: ' + e.message, 'err');
+        console.error(e);
+      }
+    }
+  }
   if (n === 5 && currentDateFrom && (pabauFetchedFrom !== currentDateFrom || pabauFetchedTo !== currentDateTo)) {
     setStatus('Fetching Pabau appointments...', 'loading');
     try {
@@ -1778,6 +1802,139 @@ function niceStep(maxVal, targetSteps) {
   return magnitude;
 }
 
+function chartNiceMax(rawMax) {
+  const step = niceStep(rawMax, 4);
+  return Math.max(Math.ceil(rawMax/step)*step, step);
+}
+
+// January 1 of the current year through the last day of the previous
+// calendar month -- e.g. if today is any day in July, this is Jan 1 to
+// Jun 30. In January itself there is no complete prior month within the
+// current year, so start > end; callers should treat that as "no data yet".
+function ytdToLastMonthBounds() {
+  const now = new Date();
+  const start = fmtLocalDate(new Date(now.getFullYear(), 0, 1));
+  const end = fmtLocalDate(new Date(now.getFullYear(), now.getMonth(), 0));
+  return { start, end };
+}
+
+// Every "YYYY-MM" month key from start to end inclusive, even ones with no
+// data -- so the trend line shows a real dip to zero for a quiet month
+// rather than silently skipping it.
+function enumerateMonths(start, end) {
+  const months = [];
+  const cur = parseDateOnly(start.slice(0,7)+'-01');
+  const stop = parseDateOnly(end.slice(0,7)+'-01');
+  while (cur <= stop) {
+    months.push(`${cur.getUTCFullYear()}-${String(cur.getUTCMonth()+1).padStart(2,'0')}`);
+    cur.setUTCMonth(cur.getUTCMonth()+1);
+  }
+  return months;
+}
+
+// Monthly Revenue (WC sales_value, Google/CPC leads only) vs Spend (Google
+// Ads) vs ROAS, drawn as an SVG line chart -- the dashboard's other charts
+// are all bars, but a multi-month trend across three differently-scaled
+// series (revenue/spend share a left axis, ROAS gets its own right axis)
+// reads far better as lines. Hover tooltips are native <title> elements on
+// each point, the same "title attribute = tooltip" convention already used
+// for every bar-chart hover elsewhere in this file.
+function renderMonthlyRevenueTrend(ytdLeads, adsRows, start, end) {
+  if (start > end) return '<div class="empty">No complete months yet this year.</div>';
+  const months = enumerateMonths(start, end);
+  const bd = {};
+  months.forEach(m => bd[m] = {revenue:0, spend:0});
+  ytdLeads.filter(isGoogleCpc).forEach(l => {
+    const d = (l.date_created||l.lead_date||'').slice(0,10);
+    if (!d || d < start || d > end || !hasSalesValue(l)) return;
+    const k = bucketKey(d, 'month');
+    if (bd[k]) bd[k].revenue += Number(l.sales_value);
+  });
+  (adsRows||[]).forEach(r => {
+    if (!r.date) return;
+    const d = r.date.slice(0,10);
+    if (d < start || d > end) return;
+    const k = bucketKey(d, 'month');
+    if (bd[k]) bd[k].spend += r.cost;
+  });
+  const rows = months.map(m => {
+    const b = bd[m];
+    return { label: bucketLabel(m, 'month'), revenue: b.revenue, spend: b.spend, roas: b.spend ? b.revenue/b.spend : null };
+  });
+
+  const W = 700, H = 240, padL = 60, padR = 60, padT = 14, padB = 26;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = rows.length;
+  const xFor = i => n===1 ? padL + plotW/2 : padL + (i/(n-1))*plotW;
+
+  const leftMax = chartNiceMax(Math.max(1, ...rows.map(r=>r.revenue), ...rows.map(r=>r.spend)));
+  const roasVals = rows.map(r=>r.roas).filter(v => v!=null);
+  const rightMax = chartNiceMax(Math.max(1, ...roasVals));
+  const yForLeft = v => padT + plotH - (v/leftMax)*plotH;
+  const yForRight = v => padT + plotH - (v/rightMax)*plotH;
+
+  const gridCount = 4;
+  const gridFracs = Array.from({length: gridCount+1}, (_,i) => i/gridCount);
+  const gridHtml = gridFracs.map(f => {
+    const y = (padT + plotH - f*plotH).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="#eef1f4" stroke-width="1"/>`;
+  }).join('');
+  const leftAxisHtml = gridFracs.map(f => {
+    const y = (padT + plotH - f*plotH).toFixed(1);
+    const val = f*leftMax;
+    const txt = val>=1000 ? CURRENCY_SYMBOL+(val/1000)+'k' : CURRENCY_SYMBOL+val;
+    return `<text x="${padL-8}" y="${Number(y)+3}" text-anchor="end" font-size="9" fill="#a0aec0">${txt}</text>`;
+  }).join('');
+  const rightAxisHtml = gridFracs.map(f => {
+    const y = (padT + plotH - f*plotH).toFixed(1);
+    const val = f*rightMax;
+    return `<text x="${W-padR+8}" y="${Number(y)+3}" text-anchor="start" font-size="9" fill="#a0aec0">${val.toFixed(1)}x</text>`;
+  }).join('');
+  const xAxisHtml = rows.map((r,i) => `<text x="${xFor(i).toFixed(1)}" y="${H-6}" text-anchor="middle" font-size="9" fill="#a0aec0">${r.label}</text>`).join('');
+
+  function linePath(values, yFor) {
+    let d = '', started = false;
+    values.forEach((v,i) => {
+      if (v==null) { started = false; return; }
+      const cmd = (started ? 'L' : 'M') + xFor(i).toFixed(1) + ',' + yFor(v).toFixed(1) + ' ';
+      d += cmd;
+      started = true;
+    });
+    return d.trim();
+  }
+  function dotsHtml(values, yFor, color, fmtV) {
+    return values.map((v,i) => v==null ? '' : `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(v).toFixed(1)}" r="3.5" fill="${color}"><title>${rows[i].label}: ${fmtV(v)}</title></circle>`).join('');
+  }
+
+  const revenuePath = linePath(rows.map(r=>r.revenue), yForLeft);
+  const spendPath = linePath(rows.map(r=>r.spend), yForLeft);
+  const roasPath = linePath(rows.map(r=>r.roas), yForRight);
+  const revenueDots = dotsHtml(rows.map(r=>r.revenue), yForLeft, '#4c565c', v=>fmtCurrency(v)+' revenue');
+  const spendDots = dotsHtml(rows.map(r=>r.spend), yForLeft, '#aec90b', v=>fmtCurrency(v)+' spend');
+  const roasDots = dotsHtml(rows.map(r=>r.roas), yForRight, '#e53e3e', v=>v.toFixed(2)+'x ROAS');
+
+  const leftTitleY = (padT + plotH/2).toFixed(1);
+  const rightTitleY = (padT + plotH/2).toFixed(1);
+
+  return `<div class="legend">
+      <div class="leg-item"><span class="leg-dot" style="background:#4c565c"></span>Revenue (left axis)</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#aec90b"></span>Spend (left axis)</div>
+      <div class="leg-item"><span class="leg-dot" style="background:#e53e3e"></span>ROAS (right axis)</div>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+      ${gridHtml}
+      <text x="16" y="${leftTitleY}" text-anchor="middle" font-size="9" fill="#718096" transform="rotate(-90 16 ${leftTitleY})">Revenue / Spend</text>
+      <text x="${W-16}" y="${rightTitleY}" text-anchor="middle" font-size="9" fill="#718096" transform="rotate(90 ${W-16} ${rightTitleY})">ROAS</text>
+      ${leftAxisHtml}
+      ${rightAxisHtml}
+      ${xAxisHtml}
+      <path d="${revenuePath}" fill="none" stroke="#4c565c" stroke-width="2"/>
+      <path d="${spendPath}" fill="none" stroke="#aec90b" stroke-width="2"/>
+      <path d="${roasPath}" fill="none" stroke="#e53e3e" stroke-width="2" stroke-dasharray="4,3"/>
+      ${revenueDots}${spendDots}${roasDots}
+    </svg>`;
+}
+
 function renderChart(leads, metric, adsRows, granularity) {
   const bd = {};
   const ensureBucket = k => bd[k] || (bd[k] = {total:0,quot:0,kw:0,sales:0,revenue:0,spend:0});
@@ -2330,6 +2487,7 @@ function renderAnalysis() {
 
   const tabBtn = (n,label) => `<button class="tab-btn ${activeMainTab===n?'active':''}" onclick="setMainTab(${n})">${label}</button>`;
   const tabDisplay = n => activeMainTab===n ? '' : 'display:none';
+  const ytdBounds = ytdToLastMonthBounds();
 
   document.getElementById('main').innerHTML = `
     ${dropDate?`<div class="drop-alert">Keyword tracking drop detected: coverage fell below 50% from <strong>${dropDate}</strong>. Check the WhatConverts script and cookie consent settings around that date.</div>`:''}
@@ -2388,6 +2546,7 @@ function renderAnalysis() {
           <div class="kpi lime"><div class="kpi-val">${roasC!=null?roasC.toFixed(2)+'x':'–'}</div><div class="kpi-label">ROAS</div><div class="kpi-sub">prior: ${roasP!=null?roasP.toFixed(2)+'x':'–'}</div></div>
         </div></div>
       </div>
+      <div class="section"><div class="section-hd"><span>Monthly Revenue Trend</span><span class="note">Jan to end of last month (${ytdBounds.start} to ${ytdBounds.end}) &bull; always year-to-date, independent of the date range above &bull; hover a point for its exact value</span></div><div class="section-bd">${renderMonthlyRevenueTrend(currentYtdLeads, currentAdsSpend, ytdBounds.start, ytdBounds.end)}</div></div>
       <div class="section"><div class="section-hd"><span>${CHART_GRANULARITIES[chartGranularity]} PPC Lead Activity</span>${chartMetricSelectHtml()}</div><div class="section-bd">${renderChart(cpcCurr, chartMetric, adsCurr, chartGranularity)}</div></div>
       <div class="section"><div class="section-hd"><span>Campaign Performance</span><span class="note">Click a campaign to view its leads &bull; click a header to sort &bull; requires the Ads Sheet CSV URL</span>${exportButtonsHtml('campaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(campaignRows,[{label:'Campaign',key:'campaign'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'campaign', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Keyword Themes</span><span class="note">Click a theme to view its leads &bull; click a header to sort</span>${exportButtonsHtml('kwTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(kwThemeRows,[{label:'Theme',key:'theme'},{label:'Total Leads Recent',key:'curr',num:true},{label:'Total Leads Prior',key:'prev',num:true},{label:'Change',key:'change',change:true},{label:'Booking %',key:'bookC',pct:true},{label:'Booking % (Prior)',key:'bookP',pct:true},{label:'Booking Δ (pp)',key:'bookChange',change:true},{label:'Sales',key:'salesC',num:true},{label:'Sales (Prior)',key:'salesP',num:true},{label:'Sales Δ',key:'salesChange',change:true},{label:'Revenue',key:'revC',num:true,currency:true},{label:'Revenue (Prior)',key:'revP',num:true,currency:true},{label:'Revenue Δ',key:'revChange',change:true,currency:true}].concat(SPEND_ROAS_COLS), {rowClick:'showThemeLeads', tableId:'kwTheme', paginate:true})}</div></div>
