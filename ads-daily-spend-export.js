@@ -34,72 +34,91 @@ const HEADERS = [
 ];
 
 function main() {
-  const ss = SpreadsheetApp.openByUrl(SHEET_URL);
-  const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
-  if (sheet.getLastRow() === 0) {
-    sheet.appendRow(HEADERS);
-  }
-
-  const startDate = getStartDate(sheet);
-  const endDate = getYesterday();
-
-  if (startDate > endDate) {
-    Logger.log('Already up to date through yesterday — nothing to pull.');
+  // Guards against two overlapping executions (e.g. a duplicate daily
+  // trigger left over from re-saving the script, or Ads Scripts retrying a
+  // run it thinks timed out) both reading the same "last row" date before
+  // either has appended, then both pulling and appending the identical date
+  // range — which is exactly what silently doubled spend for a 12-day
+  // stretch before this fix. If another run already holds the lock, this
+  // one waits briefly and then bails rather than risk a duplicate append.
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    Logger.log('Another run is already in progress — exiting without pulling data.');
     return;
   }
 
-  const startStr = formatDate(startDate);
-  const endStr = formatDate(endDate);
-  Logger.log(`Pulling keyword-level spend from ${startStr} to ${endStr}`);
+  try {
+    const ss = SpreadsheetApp.openByUrl(SHEET_URL);
+    const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(HEADERS);
+    }
 
-  const query = `
-    SELECT
-      segments.date,
-      campaign.id,
-      campaign.name,
-      ad_group.id,
-      ad_group.name,
-      ad_group_criterion.criterion_id,
-      ad_group_criterion.keyword.text,
-      ad_group_criterion.keyword.match_type,
-      metrics.cost_micros,
-      metrics.clicks,
-      metrics.impressions,
-      metrics.conversions,
-      metrics.conversions_value
-    FROM keyword_view
-    WHERE segments.date BETWEEN '${startStr}' AND '${endStr}'
-    ORDER BY segments.date ASC
-  `;
+    const startDate = getStartDate(sheet);
+    const endDate = getYesterday();
 
-  const rows = [];
-  const report = AdsApp.search(query);
-  while (report.hasNext()) {
-    const row = report.next();
-    rows.push([
-      row.segments.date,
-      row.campaign.id,
-      row.campaign.name,
-      row.adGroup.id,
-      row.adGroup.name,
-      row.adGroupCriterion.criterionId,
-      row.adGroupCriterion.keyword.text,
-      row.adGroupCriterion.keyword.matchType,
-      row.metrics.costMicros / 1000000,
-      row.metrics.clicks,
-      row.metrics.impressions,
-      row.metrics.conversions,
-      row.metrics.conversionsValue
-    ]);
+    if (startDate > endDate) {
+      Logger.log('Already up to date through yesterday — nothing to pull.');
+      return;
+    }
+
+    const startStr = formatDate(startDate);
+    const endStr = formatDate(endDate);
+    Logger.log(`Pulling keyword-level spend from ${startStr} to ${endStr}`);
+
+    const query = `
+      SELECT
+        segments.date,
+        campaign.id,
+        campaign.name,
+        ad_group.id,
+        ad_group.name,
+        ad_group_criterion.criterion_id,
+        ad_group_criterion.keyword.text,
+        ad_group_criterion.keyword.match_type,
+        metrics.cost_micros,
+        metrics.clicks,
+        metrics.impressions,
+        metrics.conversions,
+        metrics.conversions_value
+      FROM keyword_view
+      WHERE segments.date BETWEEN '${startStr}' AND '${endStr}'
+      ORDER BY segments.date ASC
+    `;
+
+    const rows = [];
+    const report = AdsApp.search(query);
+    while (report.hasNext()) {
+      const row = report.next();
+      rows.push([
+        row.segments.date,
+        row.campaign.id,
+        row.campaign.name,
+        row.adGroup.id,
+        row.adGroup.name,
+        row.adGroupCriterion.criterionId,
+        row.adGroupCriterion.keyword.text,
+        row.adGroupCriterion.keyword.matchType,
+        row.metrics.costMicros / 1000000,
+        row.metrics.clicks,
+        row.metrics.impressions,
+        row.metrics.conversions,
+        row.metrics.conversionsValue
+      ]);
+    }
+
+    if (rows.length === 0) {
+      Logger.log('No keyword rows returned for that date range.');
+      return;
+    }
+
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADERS.length).setValues(rows);
+    Logger.log(`Appended ${rows.length} rows.`);
+  } finally {
+    lock.releaseLock();
   }
-
-  if (rows.length === 0) {
-    Logger.log('No keyword rows returned for that date range.');
-    return;
-  }
-
-  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADERS.length).setValues(rows);
-  Logger.log(`Appended ${rows.length} rows.`);
 }
 
 function getStartDate(sheet) {

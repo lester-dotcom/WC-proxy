@@ -329,7 +329,7 @@ async function fetchAdsSpend(url) {
     cost: idx('Cost'), clicks: idx('Clicks'), impressions: idx('Impressions'),
     conversions: idx('Conversions'), convValue: idx('Conv. Value')
   };
-  return rows.slice(1).map(r => ({
+  const parsed = rows.slice(1).map(r => ({
     date: r[i.date],
     campaignId: r[i.campaignId],
     campaignName: r[i.campaignName],
@@ -344,6 +344,20 @@ async function fetchAdsSpend(url) {
     conversions: Number(r[i.conversions])||0,
     convValue: Number(r[i.convValue])||0
   }));
+
+  // The Ads Script appends only — if it ever runs twice for the same date
+  // (e.g. overlapping/duplicate triggers both reading the same "last row"
+  // date before either has written), the same day's keyword rows get
+  // appended twice, silently doubling spend for those days. A row is
+  // uniquely identified by date + campaign + ad group + keyword, so any
+  // repeat of that combination is a duplicate append, not real data —
+  // collapse to one row per key rather than trusting the sheet as-is.
+  const seen = new Map();
+  for (const r of parsed) {
+    const key = `${r.date}|${r.campaignId}|${r.adGroupId}|${r.keywordId}`;
+    if (!seen.has(key)) seen.set(key, r);
+  }
+  return [...seen.values()];
 }
 
 function splitAdsPeriods(adsRows, dateFrom, dateTo) {
