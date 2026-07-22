@@ -753,15 +753,18 @@ function showInvoiceRevenueKeywordLeads(encodedKey, encodedLabel) {
   openLeadsWindow(uniqueLeadsFrom(lastRenderedInvoiceRevenue.filter(r => r.rawKwKeyVal === keyword)), decodeURIComponent(encodedLabel));
 }
 
-// Same one-row-per-lead shape as showInvoiceLead.
+// Same one-row-per-lead shape as showInvoiceLead. Both source arrays can now
+// include rows with no matched lead (r.lead === null) — see the
+// unmatched-appointments fix — so this filters those out first rather than
+// letting `r.lead.lead_id` throw on every row it checks.
 function showNonAttendeeLead(encodedLeadId, encodedLabel) {
   const leadId = decodeURIComponent(encodedLeadId);
-  const leads = lastRenderedNonAttendees.filter(r => String(r.lead.lead_id) === leadId).map(r => r.lead);
+  const leads = lastRenderedNonAttendees.filter(r => r.lead && String(r.lead.lead_id) === leadId).map(r => r.lead);
   openLeadsWindow(leads, decodeURIComponent(encodedLabel));
 }
 function showAttendedLead(encodedLeadId, encodedLabel) {
   const leadId = decodeURIComponent(encodedLeadId);
-  const leads = lastRenderedAttended.filter(r => String(r.lead.lead_id) === leadId).map(r => r.lead);
+  const leads = lastRenderedAttended.filter(r => r.lead && String(r.lead.lead_id) === leadId).map(r => r.lead);
   openLeadsWindow(leads, decodeURIComponent(encodedLabel));
 }
 
@@ -1694,7 +1697,7 @@ function tbl(rows, cols, opts) {
       else if (c.statusPill) content = pill(v, r.statusCls||'s');
       else if (c.num)    content = c.currency ? fmtCurrency(v) : v;
       else content = v??'';
-      if (ci===0 && opts.rowClick) {
+      if (ci===0 && opts.rowClick && (!opts.rowClickable || opts.rowClickable(r))) {
         const keyVal = opts.rowKeyFn ? opts.rowKeyFn(r) : v;
         content = `<a href="javascript:void(0)" onclick="${opts.rowClick}('${encodeURIComponent(keyVal)}','${encodeURIComponent(v)}')" style="color:#1a4c7b;text-decoration:underline;cursor:pointer">${content}</a>`;
       }
@@ -2479,33 +2482,43 @@ function renderAnalysis() {
     attendanceStatsToRow('keyword', k, attendRawKwStats[k])
   ).sort((a,b)=>b.total-a.total);
 
-  // Attended / Non-Attendees tables: every matched appointment, one row each,
-  // with enough context to action follow-up. Name/phone come from Pabau's
-  // own client record on the appointment (falling back to the WC lead's
-  // fields) since WC's contact_name is often just a caller-ID string for
-  // phone leads — same reasoning as the Invoices tab's Pabau columns. Shared
-  // row shape between both tables; only the outcome filter/label/pill differ.
+  // Attended / Non-Attendees tables: every appointment in this outcome
+  // bucket, matched to a WC lead or not — Pabau already tells us the real
+  // outcome (classifyAttendance runs on the raw appointment, independent of
+  // any WC match), so an appointment shouldn't silently vanish from these
+  // lists just because it couldn't be tied back to a lead. Confirmed
+  // 2026-07-22: filtering to matched-only here (rather than just for the
+  // channel-breakdown tables below, where an unattributed row genuinely has
+  // no channel to bucket into) was dropping real no-shows/attendees,
+  // including the one on-record no-show in a spot-check.
+  //
+  // Name/phone come from Pabau's own client record on the appointment
+  // (falling back to the WC lead's fields, when there is one) since WC's
+  // contact_name is often just a caller-ID string for phone leads — same
+  // reasoning as the Invoices tab's Pabau columns. Shared row shape between
+  // both tables; only the outcome filter/label/pill differ.
   function attendanceDisplayRows(rows) {
     return rows.map(r => {
       const client = (r.appt.client||[])[0] || {};
+      const lead = r.lead;
       const campId = r.campaignId;
       return {
-        lead: r.lead,
-        name: client.customer_name || r.lead.contact_name || '',
-        phone: client.Mobile || r.lead.contact_phone_number || r.lead.phone_number || '',
-        leadDate: (r.lead.date_created||r.lead.lead_date||'').slice(0,10),
+        lead,
+        name: client.customer_name || (lead && lead.contact_name) || '',
+        phone: client.Mobile || (lead && (lead.contact_phone_number || lead.phone_number)) || '',
+        leadDate: lead ? (lead.date_created||lead.lead_date||'').slice(0,10) : '',
         apptDate: r.apptDate,
-        sourceMedium: `${r.lead.lead_source||'(not set)'} / ${r.lead.lead_medium||'(not set)'}`,
-        campaign: campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
-        keyword: r.rawKwKeyVal || '',
+        sourceMedium: lead ? `${lead.lead_source||'(not set)'} / ${lead.lead_medium||'(not set)'}` : 'Not Tracked',
+        campaign: lead && campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
+        keyword: lead ? (r.rawKwKeyVal || '') : '',
         outcome: r.outcome === 'no_show' ? 'No Show' : r.outcome === 'cancelled' ? 'Cancelled' : 'Attended',
         statusCls: r.outcome === 'no_show' ? 'r' : r.outcome === 'cancelled' ? 'a' : 'g'
       };
     }).sort((a,b) => new Date(b.apptDate) - new Date(a.apptDate));
   }
-  const nonAttendeeRows = attendanceDisplayRows(matchedAttendance.filter(r => r.outcome==='no_show' || r.outcome==='cancelled'));
+  const nonAttendeeRows = attendanceDisplayRows(attendanceRows.filter(r => r.outcome==='no_show' || r.outcome==='cancelled'));
   lastRenderedNonAttendees = nonAttendeeRows;
-  const attendedRows = attendanceDisplayRows(matchedAttendance.filter(r => r.outcome==='attended'));
+  const attendedRows = attendanceDisplayRows(attendanceRows.filter(r => r.outcome==='attended'));
   lastRenderedAttended = attendedRows;
 
   // Invoices tab: matches Pabau invoices (fetched separately and lazily —
@@ -2735,13 +2748,13 @@ function renderAnalysis() {
         <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:4px">Attendance is read from Pabau's appointment stage (e.g. "Not Show") only — Pabau's separate "No Show" toggle button in its appointment card isn't exposed by this API, so if a booking is only marked via that toggle without also moving its stage, this dashboard won't see it.</div>
         </div>
       </div>
-      <div class="section"><div class="section-hd"><span>Clinic Dates — Attended vs Non-Attended</span></div><div class="section-bd">${renderAttendanceChart(matchedAttendance)}</div></div>
+      <div class="section"><div class="section-hd"><span>Clinic Dates — Attended vs Non-Attended</span></div><div class="section-bd">${renderAttendanceChart(attendanceRows)}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Source / Medium</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendSource')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendSourceRows, attendCols('Source / Medium','source'), {rowClick:'showAttendSourceLeads', rowKeyFn:r=>r.rawKey, tableId:'attendSource', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Campaign</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendCampaign')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendCampaignRows, attendCols('Campaign','campaign'), {rowClick:'showAttendCampaignLeads', rowKeyFn:r=>r.campaignId, tableId:'attendCampaign', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Keyword Theme</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendTheme')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendThemeRows, attendCols('Theme','theme'), {rowClick:'showAttendThemeLeads', tableId:'attendTheme', paginate:true})}</div></div>
       <div class="section"><div class="section-hd"><span>Attendance by Raw Keyword</span><span class="note">Click a row to view its leads &bull; click a header to sort</span>${exportButtonsHtml('attendRawKw')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendRawKwRows, attendCols('Keyword','keyword'), {rowClick:'showAttendKeywordLeads', tableId:'attendRawKw', paginate:true})}</div></div>
-      <div class="section"><div class="section-hd"><span>Attended</span><span class="note">Every matched attended appointment &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('attended')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendedRows, attendanceListCols(), {rowClick:'showAttendedLead', rowKeyFn:r=>r.lead.lead_id, tableId:'attended', paginate:true})}</div></div>
-      <div class="section"><div class="section-hd"><span>Non-Attendees</span><span class="note">Every matched no-show/cancelled appointment &bull; click a row to view the lead &bull; click a header to sort</span>${exportButtonsHtml('nonAttendees')}</div><div class="section-bd" style="overflow-x:auto">${tbl(nonAttendeeRows, attendanceListCols(), {rowClick:'showNonAttendeeLead', rowKeyFn:r=>r.lead.lead_id, tableId:'nonAttendees', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Attended</span><span class="note">Every attended appointment &bull; click a row to view the lead, where one was matched &bull; click a header to sort</span>${exportButtonsHtml('attended')}</div><div class="section-bd" style="overflow-x:auto">${tbl(attendedRows, attendanceListCols(), {rowClick:'showAttendedLead', rowKeyFn:r=>r.lead?r.lead.lead_id:'', rowClickable:r=>!!r.lead, tableId:'attended', paginate:true})}</div></div>
+      <div class="section"><div class="section-hd"><span>Non-Attendees</span><span class="note">Every no-show/cancelled appointment &bull; click a row to view the lead, where one was matched &bull; click a header to sort</span>${exportButtonsHtml('nonAttendees')}</div><div class="section-bd" style="overflow-x:auto">${tbl(nonAttendeeRows, attendanceListCols(), {rowClick:'showNonAttendeeLead', rowKeyFn:r=>r.lead?r.lead.lead_id:'', rowClickable:r=>!!r.lead, tableId:'nonAttendees', paginate:true})}</div></div>
     </div>
 
     <div class="tab-panel" style="${tabDisplay(6)}">
