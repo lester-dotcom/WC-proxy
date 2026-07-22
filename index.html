@@ -1339,6 +1339,26 @@ function parsePabauDateOnly(s) {
 // differ from whoever actually saw the client -- the email/phone/name match
 // against WC leads is what scopes this to real leads, not who processed
 // the payment.
+// Pabau soft-deletes a cancelled/errored invoice as "voided" rather than
+// removing it, and the raw /invoices response still includes them -- so
+// without this filter, a client whose invoice was voided (changed their
+// mind, raised in error, etc.) still shows up as real revenue in the
+// Invoices tab. Confirmed 2026-07-22: two leads (Katy Swash, Sky Askol) with
+// voided Pabau invoices were still appearing in the dashboard.
+//
+// The exact field/casing Pabau uses isn't confirmed against a real raw
+// response -- the dashboard's own access code gates every /pabau/* request,
+// so this was diagnosed via Pabau's UI (which showed "voided") rather than
+// the API directly, and Pabau's public API docs didn't clearly document the
+// field either. This checks the most likely spots defensively; see the
+// console.log below for the actual status values Pabau returns, so this can
+// be tightened to the exact field/value once confirmed.
+function isVoidedInvoice(inv) {
+  const details = inv.details || {};
+  const candidates = [details.status, details.invoice_status, inv.status, details.state];
+  return candidates.some(v => typeof v === 'string' && /void|cancel/i.test(v));
+}
+
 async function fetchInvoicesInRange(dateFrom, dateTo) {
   let page = 1, all = [];
   while (true) {
@@ -1353,7 +1373,12 @@ async function fetchInvoicesInRange(dateFrom, dateTo) {
     page++;
     setStatus(`Fetching... ${all.length} invoices loaded`, 'loading');
   }
+  if (typeof console !== 'undefined') {
+    const distinctStatuses = [...new Set(all.map(inv => (inv.details||{}).status).filter(Boolean))];
+    console.log('[Invoices] distinct Pabau invoice status values seen:', distinctStatuses);
+  }
   return all.filter(inv => {
+    if (isVoidedInvoice(inv)) return false;
     const d = parsePabauDateOnly((inv.details||{}).invoice_date);
     return d >= dateFrom && d <= dateTo;
   });
