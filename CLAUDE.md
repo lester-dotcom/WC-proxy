@@ -64,6 +64,25 @@ so a fresh session doesn't have to re-derive the same context every time.
   `lead_source`/`lead_medium`/`gclid` intact — those leads are bucketed as
   "Not Tracked (Google CPC)" rather than dropped, since they're still real
   paid leads.
+- **"Has this recovered?" matters as much as "did this happen?"** for any
+  drop/anomaly warning shown to the user (see `detectDrop`). A detector that
+  only asks "did X cross a threshold at some point in this range" and never
+  rechecks against what happened afterward will keep showing a stale alarm
+  about an already-resolved problem forever, which trains users to ignore it.
+  Any new alert like this needs an explicit check that the *end* of the range
+  is still bad, not just that the start of the problem is somewhere in range.
+- **Smooth low-volume day-level noise before thresholding.** Daily lead
+  counts are often small enough (a handful a day) that one quiet/unlucky day
+  can swing a raw daily percentage wildly without reflecting a real trend
+  change. Pool raw counts over a trailing window (see `DROP_WINDOW_DAYS` in
+  `detectDrop`) rather than comparing single-day percentages directly.
+- **Filtering out unmatched rows entirely can silently discard real data**
+  that didn't need a match to be valid (see the Attendance tab's `classifyAttendance`,
+  which derives an appointment's real-world outcome straight from Pabau, with
+  no dependency on matching a WC lead at all). Prefer keeping a row and
+  showing "Not Tracked"/blank for the unmatched parts over dropping it, unless
+  the row is genuinely meaningless without the match (e.g. a channel-breakdown
+  table has no channel to bucket an unmatched row into).
 
 ## Workflow for changes
 
@@ -73,10 +92,18 @@ so a fresh session doesn't have to re-derive the same context every time.
 2. **Syntax-check before testing live**: extract the `<script>` block and run
    it through `new Function(...)` in Node — catches syntax errors without
    executing top-level side effects.
-3. **Verify live against real data**, not mocks — the Railway proxy and the
-   published Ads Sheet CSV are both real and reachable directly (the Ads
-   Sheet fetch in particular needs no auth, so spend-calculation logic can be
-   tested in isolation even without the dashboard access code).
+3. **Verify live against real data where possible, not mocks.** The published
+   Ads Sheet CSV needs no auth and is directly fetchable, so spend-calculation
+   logic can be tested against real numbers without any credentials. The
+   Railway proxy's `/wc/*` and `/pabau/*` routes are gated behind
+   `DASHBOARD_TOKEN` (added after this note was first written) — without that
+   token, real WhatConverts/Pabau data isn't reachable at all. In that case,
+   fall back to constructing synthetic data in the exact shape the real API
+   returns and exercising the actual functions in-browser via the JS console
+   (works for any function in global scope; functions nested as closures
+   inside `renderAnalysis()`, like `attendanceDisplayRows`, aren't callable
+   this way — test what calls them instead). Say plainly when a fix is
+   verified only this way, since it's weaker evidence than live data.
 4. **Commit directly to `main`** with a commit message that explains the root
    cause and how it was verified, not just what changed. No PRs, per
    established practice on this repo (though PR-based contributions from
