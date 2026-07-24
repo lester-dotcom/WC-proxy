@@ -1718,6 +1718,18 @@ function splitPeriods(leads, dateFrom, dateTo) {
   };
 }
 
+// Daily lead volume is often small enough (a handful a day) that a single
+// quiet day -- e.g. 1 of 3 leads happening to have a keyword, 33% -- can look
+// like a "drop" in isolation even though the surrounding days are fine. This
+// pools raw counts over a trailing window instead of comparing raw
+// single-day percentages, so one unlucky day doesn't get equal weight to a
+// day with real volume. DROP_WINDOW_DAYS counts days that actually have
+// leads, not calendar days, so a gap (no leads at all on some date) doesn't
+// stretch the window.
+const DROP_WINDOW_DAYS = 5;
+const DROP_HIGH_THRESHOLD = 70;
+const DROP_LOW_THRESHOLD = 50;
+
 function detectDrop(leads) {
   const bd = {};
   leads.forEach(l => {
@@ -1726,12 +1738,30 @@ function detectDrop(leads) {
     if (!bd[d]) bd[d]={total:0,kw:0};
     bd[d].total++; if(l.lead_keyword) bd[d].kw++;
   });
-  let wasHigh=false, drop=null;
-  for (const d of Object.keys(bd).sort()) {
-    const p = bd[d].total ? Math.round(bd[d].kw/bd[d].total*100) : 0;
-    if (p>=70) wasHigh=true;
-    if (wasHigh && p<50 && !drop) drop=d;
+  const dates = Object.keys(bd).sort();
+  if (!dates.length) return null;
+
+  const windowPct = i => {
+    const from = Math.max(0, i - DROP_WINDOW_DAYS + 1);
+    let total = 0, kw = 0;
+    for (let j = from; j <= i; j++) { total += bd[dates[j]].total; kw += bd[dates[j]].kw; }
+    return total ? Math.round(kw/total*100) : 0;
+  };
+
+  let wasHigh = false, drop = null;
+  for (let i = 0; i < dates.length; i++) {
+    const p = windowPct(i);
+    if (p >= DROP_HIGH_THRESHOLD) wasHigh = true;
+    if (wasHigh && p < DROP_LOW_THRESHOLD && !drop) drop = dates[i];
   }
+  if (!drop) return null;
+
+  // The whole point of this warning is to prompt checking something that's
+  // currently broken -- a drop that's since recovered (the trailing window
+  // ending on the last date in range is healthy again) shouldn't keep
+  // showing an alarm about a problem that's already resolved.
+  if (windowPct(dates.length - 1) >= DROP_LOW_THRESHOLD) return null;
+
   return drop;
 }
 
