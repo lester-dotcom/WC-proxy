@@ -103,7 +103,16 @@ so a fresh session doesn't have to re-derive the same context every time.
    (works for any function in global scope; functions nested as closures
    inside `renderAnalysis()`, like `attendanceDisplayRows`, aren't callable
    this way — test what calls them instead). Say plainly when a fix is
-   verified only this way, since it's weaker evidence than live data.
+   verified only this way, since it's weaker evidence than live data. When a
+   fix depends on an exact raw field value (a status string, a casing, a
+   Pabau/WC field) rather than just logic, guessing that value from a public
+   API doc or "confirmed against live data" comment isn't reliable — the
+   Attendance tab's `classifyAttendance` shipped with `'not show'` instead of
+   the real `'no show'` since the very first commit, despite that commit's
+   message claiming it was verified end-to-end. Asking the user for a
+   screenshot of the actual third-party UI (Pabau, WhatConverts, etc.) is a
+   fast, reliable way to get ground truth on an exact value when the API
+   itself isn't reachable.
 4. **Commit directly to `main`** with a commit message that explains the root
    cause and how it was verified, not just what changed. No PRs, per
    established practice on this repo (though PR-based contributions from
