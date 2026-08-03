@@ -1092,24 +1092,23 @@ function matchInvoiceToLead(inv, index) {
 }
 
 // Pabau's appointment_status is free text configured per clinic, not a
-// fixed enum — confirmed against live data, values seen include "Waiting",
-// "Confirmed " (trailing space), "confirmed", "1st", "2nd",
-// "emailsenttoconfirm", "Arrived", "Checked-in", "complete"/"Complete",
-// "Not Show", "Cancelled", and "Called no answer". This maps known values
-// case/whitespace-insensitively and surfaces anything unrecognised as
-// "unknown" rather than silently guessing at it.
+// fixed enum. This maps known values case/whitespace-insensitively and
+// surfaces anything unrecognised as "unknown" rather than silently guessing.
 //
-// BUG (found 2026-08-03): "Called no answer" was listed above as an observed
-// value but was never actually mapped to an outcome, so it fell through to
-// "unknown" — and "unknown" appointments are excluded from every settled
-// count (attended/no_show/cancelled) and the Attendance Rate denominator, so
-// they don't just get miscategorised, they silently vanish from the report
-// entirely. That's how a range with real no-shows could show a 100%/"everyone
-// attended" rate: the no-shows weren't wrong, they just weren't counted.
+// BUG (found 2026-08-03, confirmed directly against Pabau's own UI): this
+// checked for the string "not show", but Pabau's actual status is "No Show"
+// — one letter off ("Not" vs "No"), present since the very first commit that
+// added this tab, so every genuine no-show has always fallen through to
+// "unknown" rather than being counted. "unknown" is excluded from every
+// settled count (attended/no_show/cancelled) and the Attendance Rate
+// denominator, so no-shows didn't get miscategorised, they silently vanished
+// from the report entirely — how a range full of real no-shows could still
+// show a 100%/"everyone attended" rate. Matching both spellings defensively
+// in case older data or a different clinic config used the other one.
 function classifyAttendance(appt) {
   const status = ((appt.details||{}).appointment_status || '').toLowerCase().trim();
   if (['complete','arrived','checked-in'].includes(status)) return 'attended';
-  if (status === 'not show' || status === 'called no answer') return 'no_show';
+  if (status === 'no show' || status === 'not show' || status === 'called no answer') return 'no_show';
   if (status.includes('cancel')) return 'cancelled';
   if (['waiting','confirmed','1st','2nd','emailsenttoconfirm'].includes(status)) return 'upcoming';
   return 'unknown';
@@ -2805,7 +2804,7 @@ function renderAnalysis() {
           <div class="kpi ${attendUnknown>0?'amber':''}"><div class="kpi-val">${attendUnknown}</div><div class="kpi-label">Unclassified Status</div><div class="kpi-sub">excluded from rate above — see console</div></div>
         </div>
         <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:10px">Matching is by email, then phone, then name against leads already loaded for this period — a lead whose Pabau appointment falls outside the loaded window won't match. "Attendance Rate" excludes upcoming/unrecognised appointment statuses from its denominator; open the browser console after loading this tab to see which raw status strings this account uses if the split looks off.</div>
-        <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:4px">Attendance is read from Pabau's appointment stage (e.g. "Not Show") only — Pabau's separate "No Show" toggle button in its appointment card isn't exposed by this API, so if a booking is only marked via that toggle without also moving its stage, this dashboard won't see it.</div>
+        <div style="font-size:10px;color:#a0aec0;font-style:italic;margin-top:4px">Attendance is read from Pabau's appointment stage (e.g. "No Show") only — Pabau's separate "No Show" toggle button in its appointment card isn't exposed by this API, so if a booking is only marked via that toggle without also moving its stage, this dashboard won't see it.</div>
         </div>
       </div>
       <div class="section"><div class="section-hd"><span>Clinic Dates — Attended vs Non-Attended</span></div><div class="section-bd">${renderAttendanceChart(attendanceRows)}</div></div>
