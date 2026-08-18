@@ -433,29 +433,40 @@ const TABLE_PAGE_SIZE = 10;
 // Which top-level tab is showing. Persists across re-renders (sorting,
 // pagination, filter changes) the same way tableSortState/tablePageState do.
 let activeMainTab = 1;
-// Pabau appointments are only fetched the first time the Attendance tab (5)
-// is opened for a given date range, not on every dashboard load — re-fetches
-// only if dateFrom/dateTo have changed since the last Pabau fetch.
-async function setMainTab(n) {
-  activeMainTab = n;
-  if (n === 2 || n === 3) {
-    // Shared with the Paid Search tab's Monthly Revenue Trend chart -- same
-    // fixed YTD range, same cache, fetched once regardless of which of the
-    // two tabs is opened first.
-    const profileId = document.getElementById('profileSel').value;
-    const { start, end } = ytdToLastMonthBounds();
-    if (profileId && start <= end && ytdFetchedProfileId !== profileId) {
-      setStatus('Fetching YTD lead data for revenue trend charts...', 'loading');
-      try {
-        currentYtdLeads = await fetchAllLeads(profileId, start, end);
-        ytdFetchedProfileId = profileId;
-      } catch(e) {
-        setStatus('Error loading YTD data: ' + e.message, 'err');
-        console.error(e);
-      }
+// Each of these lazy-loads a tab's Pabau/YTD data only when it's actually
+// stale (wrong profile, or — for the date-range-scoped ones — wrong
+// dateFrom/dateTo), so switching tabs repeatedly doesn't refetch every time.
+//
+// BUG (found 2026-08-04): these used to run only from setMainTab(), i.e. only
+// when a tab button was actually clicked. Changing the date range (Quick
+// Range or Run Analysis) while ALREADY sitting on the Attendance or Invoices
+// tab never triggered a refetch, so those tabs kept showing whatever range
+// had been loaded whenever the tab was last opened — e.g. switching from
+// "Last Month" to "This Month" while already on the Invoices tab left
+// "Revenue by Source/Medium" completely unchanged, still reflecting last
+// month's invoices under new date labels. Now called from both setMainTab()
+// (tab switch) and runAnalysis() (date range change), gated on whichever tab
+// is actually active, so either path catches a stale range.
+async function ensureYtdLeadsLoaded() {
+  // Shared with the Paid Search tab's Monthly Revenue Trend chart -- same
+  // fixed YTD range, same cache, fetched once regardless of which of the
+  // two tabs is opened first. Not tied to the dashboard's date range at all.
+  const profileId = document.getElementById('profileSel').value;
+  const { start, end } = ytdToLastMonthBounds();
+  if (profileId && start <= end && ytdFetchedProfileId !== profileId) {
+    setStatus('Fetching YTD lead data for revenue trend charts...', 'loading');
+    try {
+      currentYtdLeads = await fetchAllLeads(profileId, start, end);
+      ytdFetchedProfileId = profileId;
+    } catch(e) {
+      setStatus('Error loading YTD data: ' + e.message, 'err');
+      console.error(e);
     }
   }
-  if (n === 5 && currentDateFrom && (pabauFetchedFrom !== currentDateFrom || pabauFetchedTo !== currentDateTo)) {
+}
+
+async function ensurePabauAppointmentsLoaded() {
+  if (currentDateFrom && (pabauFetchedFrom !== currentDateFrom || pabauFetchedTo !== currentDateTo)) {
     setStatus('Fetching Pabau appointments...', 'loading');
     try {
       currentPabauAppointments = await fetchAllAppointments(currentDateFrom, currentDateTo);
@@ -467,34 +478,50 @@ async function setMainTab(n) {
       console.error(e);
     }
   }
-  if (n === 6) {
-    const profileId = document.getElementById('profileSel').value;
-    if (profileId && allLeadsFetchedProfileId !== profileId) {
-      setStatus(`Fetching ${INVOICE_LEAD_LOOKBACK_MONTHS} months of lead history for invoice matching...`, 'loading');
-      try {
-        const end = fmtLocalDate(new Date());
-        const start = new Date();
-        start.setMonth(start.getMonth() - INVOICE_LEAD_LOOKBACK_MONTHS);
-        currentAllLeads = await fetchAllLeads(profileId, fmtLocalDate(start), end);
-        allLeadsFetchedProfileId = profileId;
-      } catch(e) {
-        setStatus('Error loading lead history: ' + e.message, 'err');
-        console.error(e);
-      }
-    }
-    if (currentDateFrom && (invoicesFetchedFrom !== currentDateFrom || invoicesFetchedTo !== currentDateTo)) {
-      setStatus('Fetching Pabau invoices...', 'loading');
-      try {
-        currentPabauInvoices = await fetchInvoicesInRange(currentDateFrom, currentDateTo);
-        invoicesFetchedFrom = currentDateFrom;
-        invoicesFetchedTo = currentDateTo;
-        setStatus(`${currentPabauInvoices.length} Pabau invoices loaded`, 'ok');
-      } catch(e) {
-        setStatus('Error loading Pabau invoices: ' + e.message, 'err');
-        console.error(e);
-      }
+}
+
+async function ensureInvoiceLeadHistoryLoaded() {
+  // A wide, profile-scoped (not date-range-scoped) lookback, so this only
+  // needs refreshing on profile change, not on date range change.
+  const profileId = document.getElementById('profileSel').value;
+  if (profileId && allLeadsFetchedProfileId !== profileId) {
+    setStatus(`Fetching ${INVOICE_LEAD_LOOKBACK_MONTHS} months of lead history for invoice matching...`, 'loading');
+    try {
+      const end = fmtLocalDate(new Date());
+      const start = new Date();
+      start.setMonth(start.getMonth() - INVOICE_LEAD_LOOKBACK_MONTHS);
+      currentAllLeads = await fetchAllLeads(profileId, fmtLocalDate(start), end);
+      allLeadsFetchedProfileId = profileId;
+    } catch(e) {
+      setStatus('Error loading lead history: ' + e.message, 'err');
+      console.error(e);
     }
   }
+}
+
+async function ensureInvoicesLoaded() {
+  if (currentDateFrom && (invoicesFetchedFrom !== currentDateFrom || invoicesFetchedTo !== currentDateTo)) {
+    setStatus('Fetching Pabau invoices...', 'loading');
+    try {
+      currentPabauInvoices = await fetchInvoicesInRange(currentDateFrom, currentDateTo);
+      invoicesFetchedFrom = currentDateFrom;
+      invoicesFetchedTo = currentDateTo;
+      setStatus(`${currentPabauInvoices.length} Pabau invoices loaded`, 'ok');
+    } catch(e) {
+      setStatus('Error loading Pabau invoices: ' + e.message, 'err');
+      console.error(e);
+    }
+  }
+}
+
+async function setMainTab(n) {
+  activeMainTab = n;
+  if (n === 2 || n === 3) await ensureYtdLeadsLoaded();
+  // Invoices are loaded for the Attendance tab too, not just Invoices itself
+  // -- the Attended/Non-Attendees tables cross-reference same-day invoices
+  // (see attendanceDisplayRows), so both tabs need the same invoice cache.
+  if (n === 5) { await ensurePabauAppointmentsLoaded(); await ensureInvoicesLoaded(); }
+  if (n === 6) { await ensureInvoiceLeadHistoryLoaded(); await ensureInvoicesLoaded(); }
   renderAnalysis();
 }
 // Which Time of Day chunk (if any) is expanded into its hourly breakdown,
@@ -1091,6 +1118,44 @@ function matchInvoiceToLead(inv, index) {
       || null;
 }
 
+// Matches an appointment to a same-day invoice directly by Pabau client
+// identity (email/phone/name) — not via a WC lead as an intermediary, so an
+// appointment that never matched a WC lead can still show a real invoice
+// value, same reasoning as showing "Not Tracked" instead of dropping
+// unmatched appointments entirely. Keyed on identity+date since the same
+// client can have unrelated invoices on other dates; sums same-day amounts
+// in the rare case of more than one invoice for the same client on the same
+// day, rather than picking one arbitrarily.
+function buildInvoiceDateIndex(invoices) {
+  const byKey = {};
+  invoices.forEach(inv => {
+    const client = (inv.client||[])[0] || {};
+    const date = pabauDateOnly((inv.details||{}).invoice_date);
+    if (!date) return;
+    const amount = Number((inv.details||{}).inv_total) || 0;
+    [normEmail(client.email), normPhone(client.mobile), normName(client.client_name)]
+      .filter(Boolean)
+      .forEach(idKey => {
+        const key = `${idKey}|${date}`;
+        byKey[key] = (byKey[key] || 0) + amount;
+      });
+  });
+  return byKey;
+}
+
+function findInvoiceAmountForAppointment(appt, invoiceDateIndex) {
+  const client = (appt.client||[])[0] || {};
+  const date = pabauDateOnly((appt.dates||{}).start_date);
+  if (!date) return null;
+  const ids = [normEmail(client.Email), normPhone(client.Mobile), normName(client.customer_name)];
+  for (const idKey of ids) {
+    if (!idKey) continue;
+    const key = `${idKey}|${date}`;
+    if (Object.prototype.hasOwnProperty.call(invoiceDateIndex, key)) return invoiceDateIndex[key];
+  }
+  return null;
+}
+
 // Pabau's appointment_status is free text configured per clinic, not a
 // fixed enum. This maps known values case/whitespace-insensitively and
 // surfaces anything unrecognised as "unknown" rather than silently guessing.
@@ -1168,6 +1233,7 @@ function attendanceListCols() {
     {label:'Keyword', key:'keyword'},
     {label:'Lead Date', key:'leadDate'},
     {label:'Appointment Date', key:'apptDate'},
+    {label:'Invoice Amount', key:'invoiceAmount', num:true, currency:true},
     {label:'Outcome', key:'outcome', statusPill:true}
   ];
 }
@@ -1363,6 +1429,17 @@ function parsePabauDateOnly(s) {
   const [d,m,y] = datePart.split('/');
   if (!d||!m||!y) return '';
   return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+}
+
+// Appointments' dates.start_date hasn't been confirmed against a raw API
+// response (see CLAUDE.md on ground-truthing exact field values) to be in
+// the same DD/MM/YYYY format invoices use — this handles either that or a
+// YYYY-MM-DD-prefixed format rather than assuming, so the appointment/
+// invoice date-matching below works regardless of which one it turns out
+// to be.
+function pabauDateOnly(s) {
+  if (!s) return '';
+  return s.includes('/') ? parsePabauDateOnly(s) : s.slice(0, 10);
 }
 
 // Unlike appointments, Pabau's /invoices endpoint has no start_date/end_date
@@ -1665,7 +1742,10 @@ function cellExportValue(c, v) {
     const sign = n>0 ? '+' : n<0 ? '-' : '';
     return sign + (c.currency ? fmtCurrency(Math.abs(n)) : Math.abs(n));
   }
-  if (c.currency) return fmtCurrency(v);
+  // null on a currency column means "not applicable" (e.g. Invoice Amount
+  // when no invoice exists), not a real zero -- fmtCurrency(null) would
+  // otherwise show a misleading "£0.00".
+  if (c.currency) return v==null ? '' : fmtCurrency(v);
   return v ?? '';
 }
 
@@ -1727,7 +1807,7 @@ function tbl(rows, cols, opts) {
       else if (c.change) content = changePill(Number(v), c.currency);
       else if (c.roas)   content = roasPill(v);
       else if (c.statusPill) content = pill(v, r.statusCls||'s');
-      else if (c.num)    content = c.currency ? fmtCurrency(v) : v;
+      else if (c.num)    content = c.currency ? (v==null ? '' : fmtCurrency(v)) : v;
       else content = v??'';
       if (ci===0 && opts.rowClick && (!opts.rowClickable || opts.rowClickable(r))) {
         const keyVal = opts.rowKeyFn ? opts.rowKeyFn(r) : v;
@@ -2268,6 +2348,15 @@ async function runAnalysis() {
       catch(e) { adsError = ' (ad spend fetch failed: ' + e.message + ')'; console.error(e); }
     }
 
+    // The Attendance/Invoices tabs' Pabau data is normally only refreshed on
+    // tab switch (see setMainTab) — but if the date range changes while
+    // already sitting on one of those tabs (Quick Range, or just re-running
+    // with new dates), nothing would otherwise trigger a refetch, leaving
+    // that tab showing stale data under the new date labels. Re-run the same
+    // checks for whichever tab is currently open.
+    if (activeMainTab === 5) { await ensurePabauAppointmentsLoaded(); await ensureInvoicesLoaded(); }
+    if (activeMainTab === 6) await ensureInvoicesLoaded();
+
     setStatus(`${currentLeads.length} leads loaded (${excluded} excluded — quotable not set)${adsError}`, adsError?'err':'ok');
     renderAnalysis();
   } catch(e) {
@@ -2495,6 +2584,12 @@ function renderAnalysis() {
   // keyword grouping so attendance can be attributed back to a channel the
   // same way bookings and revenue already are.
   const leadMatchIndex = buildLeadMatchIndex(currentLeads);
+  // For the Invoice Amount column: matches purely within Pabau's own data
+  // (client identity + exact date), independent of the WC lead match above,
+  // so an appointment with no WC lead can still show a real invoice value.
+  // currentPabauInvoices is loaded for this tab too, not just the Invoices
+  // tab — see ensureInvoicesLoaded/setMainTab.
+  const invoiceDateIndex = buildInvoiceDateIndex(currentPabauInvoices);
   const attendanceRows = currentPabauAppointments.map(appt => {
     const lead = matchApptToLead(appt, leadMatchIndex);
     return {
@@ -2504,7 +2599,8 @@ function renderAnalysis() {
       smKeyVal: lead ? smKey(lead) : null,
       campaignId: lead ? campaignKey(lead) : null,
       themeKeyVal: lead ? themeKey(lead) : null,
-      rawKwKeyVal: lead ? rawKeywordKey(lead) : null
+      rawKwKeyVal: lead ? rawKeywordKey(lead) : null,
+      invoiceAmount: findInvoiceAmountForAppointment(appt, invoiceDateIndex)
     };
   });
   lastRenderedAttendance = attendanceRows;
@@ -2594,6 +2690,7 @@ function renderAnalysis() {
         sourceMedium: lead ? `${lead.lead_source||'(not set)'} / ${lead.lead_medium||'(not set)'}` : 'Not Tracked',
         campaign: lead && campId ? (campNameMap[campId] || (campId==='NOT_TRACKED_CPC' ? NOT_TRACKED_LABEL : campId)) : '',
         keyword: lead ? (r.rawKwKeyVal || '') : '',
+        invoiceAmount: r.invoiceAmount,
         outcome: r.outcome === 'no_show' ? 'No Show' : r.outcome === 'cancelled' ? 'Cancelled' : 'Attended',
         statusCls: r.outcome === 'no_show' ? 'r' : r.outcome === 'cancelled' ? 'a' : 'g'
       };
