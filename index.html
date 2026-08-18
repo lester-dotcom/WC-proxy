@@ -1218,6 +1218,31 @@ function downloadWcAttendanceUpdateCsv() {
   a.remove();
 }
 
+// Sales Value is a standard WhatConverts field the Lead Import Tool updates
+// directly (Update Existing Leads > map the column to "Sales Value") --
+// unlike the Attendance export above, which writes to a custom field that
+// turned out not to be importable this way. One row per lead, matching
+// invoiceLeadRows (their latest Pabau invoice's total in the selected
+// range); Name and Invoice Date are included so the export can be eyeballed
+// before uploading, not because WC's import needs them -- only Lead ID and
+// Sales Value get mapped there.
+function downloadWcSalesValueUpdateCsv() {
+  const rows = lastRenderedInvoiceLeads.filter(r => r.lead && r.lead.lead_id);
+  if (!rows.length) {
+    setStatus('No matched invoices to export yet — open the Invoices tab first.', 'err');
+    return;
+  }
+  const csv = [['Lead ID','Name','Invoice Date','Sales Value'], ...rows.map(r => [r.lead.lead_id, r.name, r.invoiceDate, r.revenue.toFixed(2)])]
+    .map(r => r.map(csvEscape).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `wc-sales-value-update-${currentDateFrom}-to-${currentDateTo}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function setStatus(msg, type) {
   const el = document.getElementById('status');
   el.className = 'statusbar ' + (type||'');
@@ -2821,6 +2846,7 @@ function renderAnalysis() {
         <div class="section-hd">
           <span>Invoices Overview</span>
           <span class="note">Invoices issued ${dateFrom} to ${dateTo}</span>
+          <button class="btn btn-lime" style="padding:5px 12px;font-size:11px" onclick="downloadWcSalesValueUpdateCsv()">Export for WC Update</button>
         </div>
         <div class="section-bd"><div class="kpi-grid">
           <div class="kpi"><div class="kpi-val">${invTotalCount}</div><div class="kpi-label">Invoices Issued</div></div>
